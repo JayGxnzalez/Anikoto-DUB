@@ -1,0 +1,20 @@
+{
+    "sourceName": "Anikoto DUB",
+    "iconUrl": "https://raw.githubusercontent.com/JayGxnzalez/Anikoto-DUB/refs/heads/main/icon.png",
+    "author": {
+        "name": "Jay",
+        "icon": "https://avatars.githubusercontent.com/JayGxnzalez?s=400",
+        "url": "https://github.com/JayGxnzalez"
+    },
+    "version": "1.0.0",
+    "language": "English",
+    "streamType": "HLS",
+    "quality": "1080p",
+    "baseUrl": "https://anikototv.to/",
+    "searchBaseUrl": "https://anikototv.to/search?query=%s",
+    "scriptUrl": "https://raw.githubusercontent.com/JayGxnzalez/Anikoto-DUB/refs/heads/main/anikoto-dub.js",
+    "type": "anime",
+    "downloadSupport": true,
+    "asyncJS": true,
+    "softsub": true
+}
