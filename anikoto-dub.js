@@ -196,11 +196,7 @@ class Anikoto {
         const posterMatch = html.match(/<img\s+[^>]*data-src="([^"]+)"[^>]*class="lazyload"/);
         const poster = posterMatch ? posterMatch[1] : "";
 
-        // Capture MAL ID for Kwik streaming
-        const malMatch = html.match(/\/\/myanimelist\.net\/anime\/(\d+)/);
-        const malId = malMatch ? parseInt(malMatch[1], 10) : null;
-
-        return { title, japanese, synopsis, type, episodes, status, duration, aired, season, studio, genres, poster, malId };
+        return { title, japanese, synopsis, type, episodes, status, duration, aired, season, studio, genres, poster };
     }
 
     // ---------- Get stream servers for an episode ----------
@@ -343,135 +339,6 @@ class Anikoto {
             headers: { Referer: "https://vidwish.live/" }
         };
     }
-
-    // ─── Kwik‑based DUB streaming (mirrors the sub extractor, reads .dub.url) ───
-    static async extractKwikDubStream(url) {
-        try {
-            const match = url.match(/anime\/([^\/]+)\/([^?]+)\?num=(\d+)/);
-            if (!match) return null;
-            const [, animeSession, episodeSession, epNum] = match;
-
-            console.log("[extractStreamUrl-Kwik] Anime: " + animeSession + ", Episode: " + epNum);
-
-            // 1. Fetch play page for malId & chapterUpdatedAt
-            const playUrl = "https://animepahetv.to/play/" + animeSession + "/" + episodeSession;
-            const playResp = await soraFetch(playUrl, {
-                headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
-            });
-            if (!playResp || playResp.status !== 200) return null;
-            const playHtml = await playResp.text();
-            const malMatch = playHtml.match(/malId":"(\d+)"/);
-            const tsMatch = playHtml.match(/chapterUpdatedAt":(\d+)/);
-            if (!malMatch || !tsMatch) return null;
-            const malId = malMatch[1];
-            const chapterUpdatedAt = tsMatch[1];
-
-            // 2. Mapper
-            const mapperUrl = `https://mapper.mewcdn.online/api/mal/${malId}/${epNum}/${chapterUpdatedAt}`;
-            console.log("[extractStreamUrl-Kwik] Mapper: " + mapperUrl);
-            const mapperResp = await soraFetch(mapperUrl, {
-                headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
-            });
-            if (!mapperResp || mapperResp.status !== 200) return null;
-            let mapperJson;
-            if (typeof mapperResp.json === "function") {
-                try { mapperJson = await mapperResp.json(); } catch (e) {}
-            } else {
-                try { mapperJson = JSON.parse(await mapperResp.text()); } catch (e) {}
-            }
-            if (!mapperJson) return null;
-
-            // 3. Collect ALL qualities that have a DUB URL
-            const qualityOrder = ["Kiwi-Stream-360p", "Kiwi-Stream-720p", "Kiwi-Stream-800p", "Kiwi-Stream-1080p"];
-
-            // Debug: dump which keys (sub/dub) the mapper exposes per quality.
-            // Check Shirox logs for [Anikoto][mapper-keys] to confirm dub availability.
-            try {
-                const dbg = {};
-                for (const q of qualityOrder) {
-                    if (mapperJson[q]) dbg[q] = Object.keys(mapperJson[q]);
-                }
-                console.log("[Anikoto][mapper-keys] " + JSON.stringify(dbg));
-            } catch (e) {}
-            const streams = [];
-
-            for (const quality of qualityOrder) {
-                if (mapperJson[quality]?.dub?.url) {
-                    const encoded = mapperJson[quality].dub.url;
-
-                    // 4. Decode – AJAX header required
-                    const ajaxUrl = "https://anikototv.to/ajax/server?get=" + encoded;
-                    console.log("[extractStreamUrl-Kwik] Decoding " + quality + ": " + ajaxUrl);
-                    const ajaxResp = await soraFetch(ajaxUrl, {
-                        headers: {
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                            "X-Requested-With": "XMLHttpRequest"
-                        }
-                    });
-                    if (!ajaxResp || ajaxResp.status !== 200) continue;
-                    let ajaxJson;
-                    if (typeof ajaxResp.json === "function") {
-                        try { ajaxJson = await ajaxResp.json(); } catch (e) {}
-                    } else {
-                        try { ajaxJson = JSON.parse(await ajaxResp.text()); } catch (e) {}
-                    }
-                    if (!ajaxJson?.result?.url) continue;
-                    const kwikUrl = ajaxJson.result.url;
-                    console.log("[extractStreamUrl-Kwik] Kwik URL: " + kwikUrl);
-
-                    // 5. Fetch Kwik page (bypass DDoS‑Guard)
-                    const interceptor = new DdosGuardInterceptor();
-                    const kwikResp = await interceptor.fetchWithBypass(kwikUrl);
-                    if (!kwikResp || typeof kwikResp.text !== "function") {
-                        console.error("[extractStreamUrl-Kwik] Kwik page fetch failed for " + quality);
-                        continue;
-                    }
-                    const html = await kwikResp.text();
-
-                    // 6. Extract packed script
-                    let scriptContent = null;
-                    const scriptMatch = html.match(/<script>(.*?)<\/script>/s);
-                    if (scriptMatch) scriptContent = scriptMatch[1];
-                    else {
-                        const evalMatch = html.match(/eval\s*\(function\(p,a,c,k,e,d\)[\s\S]*?\)\)/);
-                        if (evalMatch) scriptContent = evalMatch[0];
-                    }
-                    if (!scriptContent) {
-                        console.error("[extractStreamUrl-Kwik] No script found for " + quality);
-                        continue;
-                    }
-
-                    // 7. Unpack and extract HLS
-                    let unpacked = scriptContent;
-                    try { unpacked = unpack(scriptContent); } catch (e) {}
-                    const hlsMatch = unpacked.match(/(?:const\s+source\s*=\s*['"]([^'"]+)['"])|(https?:\/\/[^\s'"<>]+\.m3u8[^\s'"<>]*)/i);
-                    if (!hlsMatch) {
-                        console.error("[extractStreamUrl-Kwik] HLS URL not found for " + quality);
-                        continue;
-                    }
-                    let hlsUrl = hlsMatch[1] || hlsMatch[0];
-                    hlsUrl = hlsUrl.replace("/stream/", "/hls/").replace("uwu.m3u8", "owo.m3u8").replace(/\\+$/, '');
-
-                    const resolution = quality.replace("Kiwi-Stream-", "");
-                    streams.push({
-                        title: "Kiwi (" + resolution + ")",
-                        streamUrl: hlsUrl,
-                        headers: { Referer: "https://kwik.cx/", Origin: "https://kwik.cx" }
-                    });
-                }
-            }
-
-            if (streams.length === 0) {
-                console.warn("[extractStreamUrl-Kwik] No dub qualities found");
-                return null;
-            }
-
-            return streams;
-        } catch (e) {
-            console.error("[extractStreamUrl-Kwik] Error: " + e);
-            return null;
-        }
-    }
 }
 
 async function extractStreamUrl(url) {
@@ -524,12 +391,10 @@ async function extractStreamUrl(url) {
         // Fetch all DUB streams in parallel
         const [
             megaDubStream,
-            vidDubStream,
-            kiwiDubStreams
+            vidDubStream
         ] = await Promise.allSettled([
             fetchMegaplayStream(megaDub),
-            fetchVidplayStream(vidplayDub),
-            Anikoto.extractKwikDubStream(url)
+            fetchVidplayStream(vidplayDub)
         ]);
 
         const streams = [];
@@ -561,14 +426,6 @@ async function extractStreamUrl(url) {
             if (s.allSubtitles?.length) {
                 allSubtitles.push(...s.allSubtitles);
             }
-        }
-
-        // Process Kwik DUB streams
-        if (kiwiDubStreams.status === "fulfilled" && kiwiDubStreams.value) {
-            streams.push(...kiwiDubStreams.value);
-            console.log("[extractStreamUrl] Added " + kiwiDubStreams.value.length + " Kiwi Dub streams");
-        } else if (kiwiDubStreams.status === "rejected") {
-            console.warn("[extractStreamUrl] Kiwi dub extraction failed:", kiwiDubStreams.reason);
         }
 
         // De-duplicate subtitle tracks (same url) across providers
@@ -653,154 +510,11 @@ async function extractEpisodes(url) {
             title: ep.title || "Episode " + ep.episode
         }));
 
-        console.log(episodesArray);
         return JSON.stringify(episodesArray);
     } catch (error) {
         console.log("Fetch error in extractEpisodes: " + error);
         return JSON.stringify([]);
     }
-}
-
-// ─── DdosGuardInterceptor (bypass DDoS protection) ───
-class DdosGuardInterceptor {
-    constructor() {
-        this.errorCodes = [403];
-        this.serverCheck = ["ddos-guard"];
-        this.cookieStore = {};
-    }
-
-    async fetchWithBypass(url, options = {}) {
-        let response = await this.fetchWithCookies(url, options);
-        if (this.errorCodes.includes(response.status)) {
-            const newCookie = await this.getNewCookie(url);
-            if (newCookie || this.cookieStore["__ddg2_"]) {
-                return this.fetchWithCookies(url, options);
-            }
-            return response;
-        }
-
-        let responseText;
-        try { responseText = await response.text(); } catch (e) { return response; }
-
-        const isBlocked = responseText.includes('ddos-guard/js-challenge') ||
-                         responseText.includes('DDoS-Guard') ||
-                         responseText.includes('data-ddg-origin');
-        if (!isBlocked) {
-            response.text = async () => responseText;
-            return response;
-        }
-
-        if (this.cookieStore["__ddg2_"]) {
-            return this.fetchWithCookies(url, options);
-        }
-
-        const newCookie = await this.getNewCookie(url);
-        if (!newCookie) {
-            response.text = async () => responseText;
-            return response;
-        }
-        return this.fetchWithCookies(url, options);
-    }
-
-    async fetchWithCookies(url, options) {
-        const cookieHeader = this.getCookieHeader();
-        const headers = options.headers || {};
-        if (cookieHeader) headers.Cookie = cookieHeader;
-        const response = await soraFetch(url, { headers });
-        try {
-            const setCookie = response.headers ? (response.headers["Set-Cookie"] || response.headers["set-cookie"]) : null;
-            if (setCookie) this.storeCookies(setCookie);
-        } catch (e) {}
-        return response;
-    }
-
-    storeCookies(setCookieString) {
-        const cookies = Array.isArray(setCookieString) ? setCookieString : [setCookieString];
-        cookies.forEach(cookieHeader => {
-            const parts = cookieHeader.split(";");
-            if (parts.length > 0) {
-                const [key, value] = parts[0].split("=");
-                if (key) this.cookieStore[key.trim()] = value?.trim() || "";
-            }
-        });
-    }
-
-    getCookieHeader() {
-        return Object.entries(this.cookieStore).map(([k, v]) => `${k}=${v}`).join("; ");
-    }
-
-    async getNewCookie(targetUrl) {
-        try {
-            const wellKnownResponse = await soraFetch("https://check.ddos-guard.net/check.js");
-            const wellKnownText = await wellKnownResponse.text();
-            const paths = wellKnownText.match(/['"](\/\.well-known\/ddos-guard\/[^'"]+)['"]/g);
-            if (!paths || paths.length === 0) return null;
-            const localPath = paths[0].replace(/['"]/g, '');
-            const match = targetUrl.match(/^(https?:\/\/[^\/]+)/);
-            if (!match) return null;
-            const baseUrl = match[1];
-            const localUrl = baseUrl + localPath;
-
-            await soraFetch(localUrl, { headers: { 'Referer': targetUrl } });
-            const checkPaths = wellKnownText.match(/['"]https:\/\/check\.ddos-guard\.net\/[^'"]+['"]/g);
-            if (checkPaths && checkPaths.length > 0) {
-                const checkUrl = checkPaths[0].replace(/['"]/g, '');
-                await soraFetch(checkUrl, { headers: { 'Referer': targetUrl } });
-            }
-            return this.cookieStore["__ddg2_"] || null;
-        } catch (e) {
-            return null;
-        }
-    }
-}
-
-// ─── Packer unpacker ───
-function unpack(source) {
-    function _filterargs(source) {
-        const juicers = [
-            /}\('(.*)', *(\d+|\[\]), *(\d+), *'(.*)'\.split\('\|'\), *(\d+), *(.*)\)\)/,
-            /}\('(.*)', *(\d+|\[\]), *(\d+), *'(.*)'\.split\('\|'\)/,
-        ];
-        for (const juicer of juicers) {
-            const args = juicer.exec(source);
-            if (args) {
-                return {
-                    payload: args[1],
-                    symtab: args[4].split("|"),
-                    radix: parseInt(args[2]),
-                    count: parseInt(args[3])
-                };
-            }
-        }
-        throw Error("Could not make sense of p.a.c.k.e.r data");
-    }
-
-    let { payload, symtab, radix, count } = _filterargs(source);
-    if (count != symtab.length) throw Error("Malformed symtab.");
-
-    let unbase;
-    const ALPHABET = {
-        62: "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        95: "' !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~'",
-    };
-    if (radix <= 36) unbase = (value) => parseInt(value, radix);
-    else {
-        const dict = {};
-        [...ALPHABET[radix] || ALPHABET[62]].forEach((c, i) => { dict[c] = i; });
-        unbase = (value) => {
-            let ret = 0;
-            [...value].reverse().forEach((c, i) => { ret += Math.pow(radix, i) * dict[c]; });
-            return ret;
-        };
-    }
-
-    function lookup(word) {
-        if (radix == 1) return symtab[parseInt(word)];
-        return symtab[unbase(word)] || word;
-    }
-
-    source = payload.replace(/\b\w+\b/g, lookup);
-    return source;
 }
 
 // ─── soraFetch (existing wrapper) ───
