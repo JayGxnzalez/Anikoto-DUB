@@ -298,14 +298,24 @@ class Anikoto {
         console.log("[Anikoto] Fetching Vidplay sources: " + sourcesUrl);
         const srcResp = await soraFetch(sourcesUrl, {
             headers: {
-                "Referer": "https://vidwish.live/",
+                "Referer": serverUrl,
+                "X-Requested-With": "XMLHttpRequest",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
             }
         });
-        if (!srcResp || srcResp.status !== 200 || typeof srcResp.json !== "function") return null;
+        if (!srcResp || srcResp.status !== 200 || typeof srcResp.json !== "function") {
+            console.warn("[Anikoto] Vidplay getSources failed — status: " + (srcResp ? srcResp.status : "null"));
+            return null;
+        }
         let data;
-        try { data = await srcResp.json(); } catch (e) { return null; }
-        if (!data?.sources?.file) return null;
+        try { data = await srcResp.json(); } catch (e) {
+            console.warn("[Anikoto] Vidplay getSources JSON parse failed: " + e);
+            return null;
+        }
+        if (!data?.sources?.file) {
+            console.warn("[Anikoto] Vidplay getSources returned no file — keys: " + JSON.stringify(Object.keys(data || {})) + ", sources: " + JSON.stringify(data?.sources));
+            return null;
+        }
 
         const tracks = data.tracks || [];
         console.log("[Anikoto] Vidplay tracks: " + JSON.stringify(tracks));
@@ -347,7 +357,7 @@ async function extractStreamUrl(url) {
         if (!match) throw new Error("Invalid URL format");
         const [, animeSession, episodeSession, epNum] = match;
 
-        console.log("[Anikoto v1.0.0] Anime: " + animeSession + ", Episode: " + epNum + ", Session: " + episodeSession);
+        console.log("[Anikoto] Anime: " + animeSession + ", Episode: " + epNum + ", Session: " + episodeSession);
 
         const servers = await Anikoto.getServers(episodeSession);
         if (!servers || servers.length === 0) {
@@ -358,6 +368,11 @@ async function extractStreamUrl(url) {
         // DUB-only servers
         const megaDub = servers.find(s => s.name === "Dub-Megaplay");
         const vidplayDub = servers.find(s => s.name.includes("Vidplay") && s.name.includes("Dub"));
+
+        if (!megaDub && !vidplayDub) {
+            console.warn("[extractStreamUrl] No dub servers in list — available: " + JSON.stringify(servers.map(s => s.name)));
+            return JSON.stringify({ streams: [], subtitles: "", subtitlesHeaders: {}, allSubtitles: [] });
+        }
 
         // Helper functions (return allSubtitles too)
         async function fetchMegaplayStream(server) {
