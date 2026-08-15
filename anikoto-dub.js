@@ -370,7 +370,7 @@ async function extractStreamUrl(url) {
         const vidplayDub = servers.find(s => s.name.includes("Vidplay") && s.name.includes("Dub"));
 
         if (!megaDub && !vidplayDub) {
-            console.warn("[extractStreamUrl] No dub servers in list — available: " + JSON.stringify(servers.map(s => s.name)));
+            console.warn("[extractStreamUrl] No dub servers available for this episode");
             return JSON.stringify({ streams: [], subtitles: "", subtitlesHeaders: {}, allSubtitles: [] });
         }
 
