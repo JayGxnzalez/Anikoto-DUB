@@ -365,22 +365,20 @@ async function extractStreamUrl(url) {
             return JSON.stringify({ streams: [], subtitles: "", subtitlesHeaders: {}, allSubtitles: [] });
         }
 
-        // DUB-only servers
-        const megaDub = servers.find(s => s.name === "Dub-Megaplay");
-        const vidplayDub = servers.find(s => s.name.includes("Vidplay") && s.name.includes("Dub"));
+        // Any server whose name marks it as dub — not limited to known hosts
+        const dubServers = servers.filter(s => s.name && s.name.includes("Dub"));
 
-        if (!megaDub && !vidplayDub) {
+        if (dubServers.length === 0) {
             console.warn("[extractStreamUrl] No dub servers available for this episode");
             return JSON.stringify({ streams: [], subtitles: "", subtitlesHeaders: {}, allSubtitles: [] });
         }
 
         // Helper functions (return allSubtitles too)
         async function fetchMegaplayStream(server) {
-            if (!server) return null;
             const streamData = await Anikoto.extractMegaplayStream(server.url);
             if (!streamData) return null;
             return {
-                title: server.name.replace("Dub-Megaplay", "Megaplay"),
+                title: "Megaplay",
                 streamUrl: streamData.streamUrl,
                 headers: streamData.headers,
                 subtitles: streamData.subtitles,
@@ -390,11 +388,10 @@ async function extractStreamUrl(url) {
         }
 
         async function fetchVidplayStream(server) {
-            if (!server) return null;
             const streamData = await Anikoto.extractVidplayStream(server.url);
             if (!streamData) return null;
             return {
-                title: server.name.replace("Dub-Vidplay", "Vidplay").replace("Vidplay-Dub", "Vidplay"),
+                title: "Vidplay",
                 streamUrl: streamData.streamUrl,
                 headers: streamData.headers,
                 subtitles: streamData.subtitles,
@@ -403,36 +400,25 @@ async function extractStreamUrl(url) {
             };
         }
 
-        // Fetch all DUB streams in parallel
-        const [
-            megaDubStream,
-            vidDubStream
-        ] = await Promise.allSettled([
-            fetchMegaplayStream(megaDub),
-            fetchVidplayStream(vidplayDub)
-        ]);
+        // Route each dub server to its extractor by name; flag anything unrecognized
+        // instead of silently dropping it, so a new host shows up in logs.
+        const fetchPromises = dubServers.map(server => {
+            if (server.name === "Dub-Megaplay") return fetchMegaplayStream(server);
+            if (server.name.includes("Vidplay")) return fetchVidplayStream(server);
+            console.warn("[extractStreamUrl] Unrecognized dub server \"" + server.name + "\" (" + server.url + ") — no extractor for this host yet");
+            return Promise.resolve(null);
+        });
+
+        const results = await Promise.allSettled(fetchPromises);
 
         const streams = [];
         let subtitles = "";
         let subtitlesHeaders = {};
         let allSubtitles = [];
 
-        // Process Megaplay DUB
-        if (megaDubStream.status === "fulfilled" && megaDubStream.value) {
-            const s = megaDubStream.value;
-            streams.push({ title: s.title, streamUrl: s.streamUrl, headers: s.headers });
-            if (!subtitles && s.subtitles) {
-                subtitles = s.subtitles;
-                subtitlesHeaders = s.subtitlesHeaders;
-            }
-            if (s.allSubtitles?.length) {
-                allSubtitles.push(...s.allSubtitles);
-            }
-        }
-
-        // Process Vidplay DUB
-        if (vidDubStream.status === "fulfilled" && vidDubStream.value) {
-            const s = vidDubStream.value;
+        for (const r of results) {
+            if (r.status !== "fulfilled" || !r.value) continue;
+            const s = r.value;
             streams.push({ title: s.title, streamUrl: s.streamUrl, headers: s.headers });
             if (!subtitles && s.subtitles) {
                 subtitles = s.subtitles;
