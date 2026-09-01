@@ -131,18 +131,18 @@ class Anikoto {
     // via data-tip, so this returns it without a separate watch-page fetch.
     static async findShow(title) {
         const url = ANIKOTO_BASE + "/filter?keyword=" + encodeURIComponent(title);
-        console.log("[Fallback] Searching Anikoto: " + url);
+        console.log("[Anikoto] Searching Anikoto: " + url);
 
         const resp = await soraFetch(url, { headers: { "User-Agent": UA, "Referer": ANIKOTO_BASE + "/" } });
         if (!resp || resp.status !== 200) {
-            console.error("[Fallback] Search fetch failed, status: " + (resp ? resp.status : "null"));
+            console.error("[Anikoto] Search fetch failed, status: " + (resp ? resp.status : "null"));
             return null;
         }
         const html = await resp.text();
 
         const gridStart = html.indexOf('id="list-items"');
         if (gridStart === -1) {
-            console.warn("[Fallback] No results grid found for: " + title);
+            console.warn("[Anikoto] No results grid found for: " + title);
             return null;
         }
         const gridEndMarker = html.indexOf("pre-pagination", gridStart);
@@ -150,7 +150,7 @@ class Anikoto {
 
         const blocks = gridHtml.split('<div class="item ">').slice(1);
         if (blocks.length === 0) {
-            console.warn("[Fallback] No search results found for: " + title);
+            console.warn("[Anikoto] No search results found for: " + title);
             return null;
         }
 
@@ -158,25 +158,41 @@ class Anikoto {
         for (const block of blocks) {
             const slugMatch = block.match(/href="https:\/\/anikototv\.to\/watch\/([^"\/]+)\/ep-\d+"/);
             const tipMatch = block.match(/data-tip="(\d+)"/);
-            const titleMatch = block.match(/data-jp="([^"]*)"/);
+            // Use the anchor's visible text (English title), not the data-jp
+            // attribute — that attribute holds the Japanese/romaji title,
+            // which only coincidentally matched AniList's English title for
+            // some shows (e.g. "Bleach" = "Bleach") and silently failed for
+            // most others.
+            const titleMatch = block.match(/<a class="name d-title"[^>]*>([^<]*)<\/a>/);
             if (!slugMatch || !tipMatch) continue;
             candidates.push({
                 slug: slugMatch[1],
                 showId: tipMatch[1],
-                title: titleMatch ? titleMatch[1] : ""
+                title: titleMatch ? titleMatch[1].trim() : ""
             });
         }
         if (candidates.length === 0) {
-            console.warn("[Fallback] Could not parse any results for: " + title);
+            console.warn("[Anikoto] Could not parse any results for: " + title);
             return null;
         }
 
-        const normalize = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        // Anikoto explicitly labels a franchise's first part "Part 1" /
+        // "Season 1" in its own catalog, while AniList/MAL commonly leave
+        // the base entry unlabeled (e.g. AniList: "Attack on Titan Final
+        // Season", Anikoto: "Attack on Titan: Final Season, Part 1").
+        // Stripping that trailing token before comparing lets these match
+        // without loosening matching in a way that risks a wrong-franchise
+        // pick — this only strips a specific known suffix, not general
+        // fuzzy matching.
+        const normalize = (s) => (s || "")
+            .toLowerCase()
+            .replace(/[^a-z0-9]/g, "")
+            .replace(/(part|season)1$/, "");
         const wantedNorm = normalize(title);
         const exact = candidates.find(c => normalize(c.title) === wantedNorm);
         const chosen = exact || candidates[0];
 
-        console.log("[Fallback] Matched: \"" + chosen.title + "\" (slug: " + chosen.slug + ", showId: " + chosen.showId + ") for search: " + title
+        console.log("[Anikoto] Matched: \"" + chosen.title + "\" (slug: " + chosen.slug + ", showId: " + chosen.showId + ") for search: " + title
             + (exact ? "" : " [no exact title match among " + candidates.length + " results — using first]"));
 
         return chosen; // { slug, showId, title }
@@ -188,17 +204,17 @@ class Anikoto {
             headers: { "User-Agent": UA, "X-Requested-With": "XMLHttpRequest", "Referer": ANIKOTO_BASE + "/" }
         });
         if (!resp || resp.status !== 200 || typeof resp.json !== "function") {
-            console.warn("[Fallback] Episode list fetch failed for showId " + showId + ", status: " + (resp ? resp.status : "null"));
+            console.warn("[Anikoto] Episode list fetch failed for showId " + showId + ", status: " + (resp ? resp.status : "null"));
             return [];
         }
         let json;
         try { json = await resp.json(); } catch (e) {
-            console.warn("[Fallback] Episode list JSON parse failed for showId " + showId);
+            console.warn("[Anikoto] Episode list JSON parse failed for showId " + showId);
             return [];
         }
         const html = json?.result || "";
         if (!html) {
-            console.warn("[Fallback] Episode list result HTML was empty for showId " + showId);
+            console.warn("[Anikoto] Episode list result HTML was empty for showId " + showId);
         }
 
         const episodes = [];
@@ -218,12 +234,12 @@ class Anikoto {
         if (expectedMalId && episodes.length > 0) {
             const actualMal = episodes.find(e => e.mal)?.mal;
             if (actualMal && String(actualMal) !== String(expectedMalId)) {
-                console.warn("[Fallback] Show mismatch — expected MAL id " + expectedMalId + " but episode list belongs to MAL id " + actualMal + ". findShow() likely matched the wrong anime.");
+                console.warn("[Anikoto] Show mismatch — expected MAL id " + expectedMalId + " but episode list belongs to MAL id " + actualMal + ". findShow() likely matched the wrong anime.");
                 return [];
             }
         }
 
-        console.log("[Fallback] Parsed " + episodes.length + " episodes for showId " + showId + ", dub count: " + episodes.filter(e => e.hasDub).length);
+        console.log("[Anikoto] Parsed " + episodes.length + " episodes for showId " + showId + ", dub count: " + episodes.filter(e => e.hasDub).length);
         return episodes;
     }
 
@@ -273,7 +289,7 @@ class Anikoto {
     static async extractFromEmbed(embedUrl) {
         const host = [MEGAPLAY, VIDWISH, VIDTUBE].find(h => embedUrl.includes(h.replace("https://", "")));
         if (!host) {
-            console.warn("[Fallback] Unrecognized dub server host — no extractor for: " + embedUrl);
+            console.warn("[Anikoto] Unrecognized dub server host — no extractor for: " + embedUrl);
             return null;
         }
         const fileId = await extractFileId(embedUrl, host + "/");
@@ -300,7 +316,7 @@ class Anikoto {
         const episodes = await Anikoto.getEpisodes(show.showId, expectedMalId);
         const ep = episodes.find(e => e.num === epNum);
         if (!ep || !ep.hasDub) {
-            console.warn("[Fallback] Anikoto has no dub for episode " + epNum + " either");
+            console.warn("[Anikoto] No dub found for episode " + epNum);
             return null;
         }
 
@@ -326,7 +342,7 @@ class Anikoto {
         }
         if (streams.length === 0) return null;
 
-        console.log("[Fallback] Resolved " + streams.length + " stream(s) via full Anikoto scrape chain");
+        console.log("[Anikoto] Resolved " + streams.length + " stream(s) via full Anikoto scrape chain");
         return { streams, subtitles, subtitlesHeaders, allSubtitles };
     }
 
