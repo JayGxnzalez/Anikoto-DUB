@@ -324,12 +324,18 @@ async function extractStreamUrl(url) {
             return JSON.stringify({ streams: [], subtitles: "", subtitlesHeaders: {}, allSubtitles: [] });
         }
 
+        // Anikoto's own server labels carry a trailing "-N" on Vidstream/
+        // Vidplay entries (e.g. "Vidstream-2") that's just noise here —
+        // strip it. HD-1/HD-2 are left untouched since the number there
+        // is meaningful (distinguishes two real, different servers).
+        const cleanLabel = (name) => name.replace(/^(Vidstream|Vidplay)-\d+$/, "$1");
+
         const results = await Promise.allSettled(dubServers.map(async (server) => {
             const embedUrl = await Anikoto.resolveServer(server.linkId);
             if (!embedUrl) return null;
             const streamData = await Anikoto.extractFromEmbed(embedUrl);
             if (!streamData) return null;
-            return { title: server.name, ...streamData };
+            return { title: cleanLabel(server.name), ...streamData };
         }));
 
         const streams = [];
