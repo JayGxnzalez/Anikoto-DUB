@@ -92,85 +92,7 @@ class AniList {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════
-// Primary path — direct Megaplay lookup keyed by MAL ID.
-// Bypasses Anikoto's own site and token system entirely.
-// ══════════════════════════════════════════════════════════════════
-async function tryMegaplayDirect(malId, epNum, audio) {
-    const embedUrl = `${MEGAPLAY}/stream/mal/${malId}/${epNum}/${audio}`;
-    console.log("[Direct] Trying Megaplay/MAL: " + embedUrl);
-
-    const resp = await soraFetch(embedUrl, { headers: { "Referer": MEGAPLAY + "/", "User-Agent": UA } });
-    if (!resp || resp.status !== 200) return null;
-    const html = await resp.text();
-
-    const fileId = html.match(/data-id="([^"]*)"/)?.[1];
-    if (!fileId) {
-        console.log("[Direct] No data-id — Megaplay has no MAL-keyed entry for this episode");
-        return null;
-    }
-    const realId = html.match(/data-realid="([^"]*)"/)?.[1] || null;
-
-    const [megaResult, vidwishResult] = await Promise.allSettled([
-        fetchMegaplaySources(fileId),
-        realId ? fetchVidwishSources(realId, audio) : Promise.resolve(null)
-    ]);
-
-    const streams = [];
-    let subtitles = "", subtitlesHeaders = {}, allSubtitles = [];
-
-    const mega = megaResult.status === "fulfilled" ? megaResult.value : null;
-    if (mega) {
-        streams.push({ title: "Megaplay", streamUrl: mega.streamUrl, headers: mega.headers });
-        subtitles = mega.subtitles; subtitlesHeaders = mega.subtitlesHeaders;
-        allSubtitles.push(...mega.allSubtitles);
-    }
-
-    const vidwish = vidwishResult.status === "fulfilled" ? vidwishResult.value : null;
-    if (vidwish) {
-        streams.push({ title: "Vidplay", streamUrl: vidwish.streamUrl, headers: vidwish.headers });
-        if (!subtitles && vidwish.subtitles) { subtitles = vidwish.subtitles; subtitlesHeaders = vidwish.subtitlesHeaders; }
-        allSubtitles.push(...vidwish.allSubtitles);
-    }
-
-    if (streams.length === 0) {
-        console.log("[Direct] data-id found but getSources returned nothing usable");
-        return null;
-    }
-
-    console.log("[Direct] Resolved " + streams.length + " stream(s) via direct Megaplay/MAL lookup");
-    return { streams, subtitles, subtitlesHeaders, allSubtitles };
-}
-
-async function fetchMegaplaySources(fileId) {
-    const url = `${MEGAPLAY}/stream/getSources?id=${fileId}&id=${fileId}`;
-    const resp = await soraFetch(url, { headers: { "Referer": MEGAPLAY + "/", "User-Agent": UA, "X-Requested-With": "XMLHttpRequest" } });
-    if (!resp || resp.status !== 200 || typeof resp.json !== "function") return null;
-    let data;
-    try { data = await resp.json(); } catch (e) { return null; }
-    if (!data?.sources?.file) return null;
-    console.log("[Direct] Megaplay tracks field: " + JSON.stringify(data.tracks ?? "MISSING") + " | full response keys: " + JSON.stringify(Object.keys(data)));
-    return buildStreamResult(data, MEGAPLAY + "/");
-}
-
-async function fetchVidwishSources(realId, audio) {
-    const embedUrl = `${VIDWISH}/stream/s-2/${realId}/${audio}`;
-    const embedResp = await soraFetch(embedUrl, { headers: { "Referer": VIDWISH + "/", "User-Agent": UA } });
-    if (!embedResp || embedResp.status !== 200) return null;
-    const embedHtml = await embedResp.text();
-    const fileId = embedHtml.match(/data-id="([^"]*)"/)?.[1];
-    if (!fileId) return null;
-
-    const url = `${VIDWISH}/stream/getSources?id=${fileId}&id=${fileId}`;
-    const resp = await soraFetch(url, { headers: { "Referer": VIDWISH + "/", "User-Agent": UA, "X-Requested-With": "XMLHttpRequest" } });
-    if (!resp || resp.status !== 200 || typeof resp.json !== "function") return null;
-    let data;
-    try { data = await resp.json(); } catch (e) { return null; }
-    if (!data?.sources?.file) return null;
-    return buildStreamResult(data, VIDWISH + "/");
-}
-
-// Shared subtitle/stream shaping — same contract used across both paths.
+// Shared subtitle/stream shaping — used by the Anikoto embed extractor.
 function buildStreamResult(data, referer) {
     const tracks = data.tracks || [];
     let englishSub = "";
@@ -193,11 +115,11 @@ function buildStreamResult(data, referer) {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Fallback path — full Anikoto site scrape. Only used when the direct
-// Megaplay/MAL lookup finds nothing, or when AniList doesn't know the
-// episode count yet.
+// Anikoto site scrape — search, episode list, server list, resolve.
+// Same pattern as every other module: search the real site, use
+// whatever's actually there for this episode.
 // ══════════════════════════════════════════════════════════════════
-class AnikotoFallback {
+class Anikoto {
     // Confirmed live: real results live in #list-items. The page also
     // carries a "Top rated anime" sidebar using the identical
     // <a class="item" href=".../watch/..."> pattern — unscoped matching
@@ -373,22 +295,22 @@ class AnikotoFallback {
     // Resolves via the full chain: search -> showId -> episode list -> per-episode
     // ids token -> dub server list -> resolve each token -> extract.
     static async resolve(title, epNum, expectedMalId) {
-        const show = await AnikotoFallback.findShow(title);
+        const show = await Anikoto.findShow(title);
         if (!show) return null;
-        const episodes = await AnikotoFallback.getEpisodes(show.showId, expectedMalId);
+        const episodes = await Anikoto.getEpisodes(show.showId, expectedMalId);
         const ep = episodes.find(e => e.num === epNum);
         if (!ep || !ep.hasDub) {
             console.warn("[Fallback] Anikoto has no dub for episode " + epNum + " either");
             return null;
         }
 
-        const dubServers = await AnikotoFallback.getServerList(ep.ids, "dub");
+        const dubServers = await Anikoto.getServerList(ep.ids, "dub");
         if (dubServers.length === 0) return null;
 
         const results = await Promise.allSettled(dubServers.map(async (server) => {
-            const embedUrl = await AnikotoFallback.resolveServer(server.linkId);
+            const embedUrl = await Anikoto.resolveServer(server.linkId);
             if (!embedUrl) return null;
-            const streamData = await AnikotoFallback.extractFromEmbed(embedUrl);
+            const streamData = await Anikoto.extractFromEmbed(embedUrl);
             if (!streamData) return null;
             return { title: server.name, ...streamData };
         }));
@@ -410,9 +332,9 @@ class AnikotoFallback {
 
     // Only used when AniList doesn't know the episode count.
     static async getEpisodeCount(title, expectedMalId) {
-        const show = await AnikotoFallback.findShow(title);
+        const show = await Anikoto.findShow(title);
         if (!show) return null;
-        const episodes = await AnikotoFallback.getEpisodes(show.showId, expectedMalId);
+        const episodes = await Anikoto.getEpisodes(show.showId, expectedMalId);
         const dubEpisodes = episodes.filter(e => e.hasDub).map(e => e.num);
         return dubEpisodes.length ? Math.max(...dubEpisodes) : null;
     }
@@ -486,7 +408,7 @@ async function extractEpisodes(url) {
         let epCount = epsStr ? parseInt(epsStr, 10) : null;
         if (!epCount) {
             console.log("[extractEpisodes] AniList episode count unknown — checking Anikoto");
-            epCount = await AnikotoFallback.getEpisodeCount(title, malId);
+            epCount = await Anikoto.getEpisodeCount(title, malId);
         }
         if (!epCount) {
             console.warn("[extractEpisodes] Could not determine episode count for: " + title);
@@ -518,21 +440,13 @@ async function extractStreamUrl(url) {
 
         console.log("[extractStreamUrl] MAL: " + malId + ", Episode: " + epNum + ", Title: " + title);
 
-        // Primary: scrape Anikoto's own site for this exact episode, same
-        // as every other module — real servers currently on the page
-        // (Megaplay, Vidplay, VidTube, whatever's live), not a guess.
-        let result = await AnikotoFallback.resolve(title, epNum, malId);
-
-        // Fallback: only if Anikoto genuinely has nothing for this episode
-        // (title didn't match cleanly, or the show truly has no dub there
-        // yet) — try the direct Megaplay/MAL shortcut as a last resort.
-        if (!result) {
-            console.log("[extractStreamUrl] Anikoto scrape found nothing — trying direct Megaplay/MAL as fallback");
-            result = await tryMegaplayDirect(malId, epNum, "dub");
-        }
+        // Scrape Anikoto's own site for this exact episode, same as every
+        // other module — real servers currently on the page (Megaplay,
+        // Vidplay, VidTube, whatever's live for this episode), not a guess.
+        const result = await Anikoto.resolve(title, epNum, malId);
 
         if (!result) {
-            console.warn("[extractStreamUrl] No dub found via either path");
+            console.warn("[extractStreamUrl] No dub found for this episode on Anikoto");
             return JSON.stringify({ streams: [], subtitles: "", subtitlesHeaders: {}, allSubtitles: [] });
         }
 
