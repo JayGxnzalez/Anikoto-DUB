@@ -1,466 +1,347 @@
-class Anikoto {
-    // ---------- Search ----------
+const ANIKOTO_BASE = "https://anikototv.to";
+const MEGAPLAY = "https://megaplay.buzz";
+const VIDWISH = "https://vidwish.live";
+const ANILIST_API = "https://graphql.anilist.co";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+
+// ══════════════════════════════════════════════════════════════════
+// AniList — search + episode-count lookup. Stable public API, no auth.
+// ══════════════════════════════════════════════════════════════════
+class AniList {
     static async search(keyword) {
-        const base = "https://animepahetv.to/search?q=" + encodeURIComponent(keyword).replace(/%20/g, "+");
-        const headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            "Referer": "https://animepahetv.to/"
-        };
-
-        console.log("[Anikoto] Searching HTML pages, page 1: " + base);
-
-        const resp1 = await soraFetch(base, { headers });
-        if (!resp1 || resp1.status !== 200) {
-            console.error("[Anikoto] Failed to fetch page 1");
-            return [];
-        }
-        const html1 = await resp1.text();
-
-        let totalPages = 1;
-        const lastLinkMatch = html1.match(/<a\s+title="Last"\s+class="page-link"\s+href="[^"]*&?page=(\d+)"/i);
-        if (lastLinkMatch) {
-            totalPages = parseInt(lastLinkMatch[1], 10);
-            console.log("[Anikoto] Total pages: " + totalPages);
-        } else {
-            const pageMatches = [...html1.matchAll(/<a[^>]*href="[^"]*&?page=(\d+)"[^>]*>/ig)];
-            if (pageMatches.length > 0) {
-                const nums = pageMatches.map(m => parseInt(m[1], 10)).filter(n => !isNaN(n));
-                if (nums.length > 0) totalPages = Math.max(...nums);
-                console.log("[Anikoto] Detected total pages: " + totalPages);
-            }
-        }
-
-        const parsePage = (html) => {
-            const items = [];
-            const blocks = html.split('<div class="anime-item">');
-            for (let i = 1; i < blocks.length; i++) {
-                const block = blocks[i];
-                const posterLinkMatch = block.match(/<a\s+[^>]*href="https:\/\/animepahetv\.to\/anime\/([^"]+)"[^>]*class="anime-poster"/);
-                if (!posterLinkMatch) continue;
-                const session = posterLinkMatch[1];
-                const titleMatch = block.match(/<div\s+class="anime-name">\s*<a[^>]*>([^<]+)<\/a>/);
-                const title = titleMatch ? titleMatch[1].trim() : "Untitled";
-                const imgMatch = block.match(/<img\s+[^>]*src="([^"]+)"[^>]*class="lazyload"/);
-                const poster = imgMatch ? imgMatch[1] : "";
-                items.push({ title, poster, session });
-            }
-            return items;
-        };
-
-        let allItems = parsePage(html1);
-
-        if (totalPages > 1) {
-            const pagePromises = [];
-            for (let p = 2; p <= totalPages; p++) {
-                const url = base + "&page=" + p;
-                console.log("[Anikoto] Fetching page " + p + ": " + url);
-                pagePromises.push(soraFetch(url, { headers }).then(resp => {
-                    if (!resp || resp.status !== 200) return "";
-                    return resp.text();
-                }));
-            }
-            const pageHTMLs = await Promise.allSettled(pagePromises);
-            for (const result of pageHTMLs) {
-                if (result.status === "fulfilled" && result.value) {
-                    const items = parsePage(result.value);
-                    allItems = allItems.concat(items);
+        const query = `query($search: String) {
+            Page(perPage: 15) {
+                media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
+                    idMal
+                    title { english romaji }
+                    episodes
+                    coverImage { large }
                 }
             }
-        }
+        }`;
 
-        console.log("[Anikoto] Search returned " + allItems.length + " items total");
-        return allItems;
-    }
-
-    // ---------- Get episode list ----------
-    static async getEpisodes(session) {
-        const baseUrl = "https://animepahetv.to/viewApi?m=release&id=" + session + "&sort=episode_desc";
-        const headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/javascript, */*; q=0.01"
-        };
-
-        // Helper: fetch a page and return parsed JSON object
-        const fetchPage = async (url) => {
-            const resp = await soraFetch(url, { headers });
-            if (!resp || resp.status !== 200) {
-                console.error("[Anikoto] Page fetch failed, status: " + (resp ? resp.status : "null"));
-                return null;
-            }
-            // Try standard .json() first, then fallback to text + JSON.parse
-            if (typeof resp.json === "function") {
-                try {
-                    return await resp.json();
-                } catch (e) {
-                    console.error("[Anikoto] .json() failed:", e);
-                }
-            }
-            // Fallback: parse JSON from text
-            try {
-                const text = await resp.text();
-                return JSON.parse(text);
-            } catch (e) {
-                console.error("[Anikoto] JSON parse from text failed:", e);
-                return null;
-            }
-        };
-
-        // Fetch page 1
-        const url1 = baseUrl + "&page=1";
-        console.log("[Anikoto] Fetching episodes page 1: " + url1);
-        const json1 = await fetchPage(url1);
-        if (!json1 || !json1.data) {
-            console.error("[Anikoto] Failed to get page 1 data");
-            return [];
-        }
-
-        const allEpisodes = json1.data || [];
-        const totalPages = json1.last_page || 1;
-        console.log("[Anikoto] Episodes total pages: " + totalPages + " | first batch: " + allEpisodes.length);
-
-        // Fetch remaining pages in parallel
-        if (totalPages > 1) {
-            const pagePromises = [];
-            for (let p = 2; p <= totalPages; p++) {
-                const url = baseUrl + "&page=" + p;
-                console.log("[Anikoto] Scheduling fetch for page " + p + ": " + url);
-                pagePromises.push(
-                    fetchPage(url).then(json => {
-                        if (json && json.data) {
-                            console.log("[Anikoto] Page " + p + " data count: " + json.data.length);
-                            allEpisodes.push(...json.data);
-                        } else {
-                            console.warn("[Anikoto] Page " + p + " returned no data");
-                        }
-                    }).catch(e => {
-                        console.error("[Anikoto] Error fetching page " + p + ":", e);
-                    })
-                );
-            }
-            // Wait for all secondary pages to finish
-            await Promise.allSettled(pagePromises);
-        }
-
-        // Sort ascending by episode number
-        allEpisodes.sort((a, b) => a.episode - b.episode);
-        console.log("[Anikoto] Total episodes fetched: " + allEpisodes.length);
-        return allEpisodes;
-    }
-
-    // ---------- Get anime details (scrape HTML) ----------
-    static async getDetails(session) {
-        const url = "https://animepahetv.to/anime/" + session;
-        console.log("[Anikoto] Fetching details: " + url);
-
-        const resp = await soraFetch(url, {
-            headers: {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-            }
+        console.log("[AniList] Searching: " + keyword);
+        const resp = await soraFetch(ANILIST_API, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Accept": "application/json" },
+            body: JSON.stringify({ query, variables: { search: keyword } })
         });
+        if (!resp || resp.status !== 200 || typeof resp.json !== "function") {
+            console.error("[AniList] Search fetch failed, status: " + (resp ? resp.status : "null"));
+            return [];
+        }
+        let json;
+        try { json = await resp.json(); } catch (e) {
+            console.error("[AniList] Search JSON parse failed: " + e);
+            return [];
+        }
+
+        const media = json?.data?.Page?.media || [];
+        // Titles without a MAL mapping can't be used by either resolution
+        // path (primary is MAL-keyed, fallback needs a title to search
+        // Anikoto by) — filter them out rather than surfacing dead entries.
+        const items = media
+            .filter(m => m.idMal)
+            .map(m => ({
+                malId: m.idMal,
+                title: m.title?.english || m.title?.romaji || "Untitled",
+                episodes: m.episodes || null,
+                poster: m.coverImage?.large || ""
+            }));
+
+        console.log("[AniList] Search returned " + items.length + " usable items");
+        return items;
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Primary path — direct Megaplay lookup keyed by MAL ID.
+// Bypasses Anikoto's own site and token system entirely.
+// ══════════════════════════════════════════════════════════════════
+async function tryMegaplayDirect(malId, epNum, audio) {
+    const embedUrl = `${MEGAPLAY}/stream/mal/${malId}/${epNum}/${audio}`;
+    console.log("[Direct] Trying Megaplay/MAL: " + embedUrl);
+
+    const resp = await soraFetch(embedUrl, { headers: { "Referer": MEGAPLAY + "/", "User-Agent": UA } });
+    if (!resp || resp.status !== 200) return null;
+    const html = await resp.text();
+
+    const fileId = html.match(/data-id="([^"]*)"/)?.[1];
+    if (!fileId) {
+        console.log("[Direct] No data-id — Megaplay has no MAL-keyed entry for this episode");
+        return null;
+    }
+    const realId = html.match(/data-realid="([^"]*)"/)?.[1] || null;
+
+    const [megaResult, vidwishResult] = await Promise.allSettled([
+        fetchMegaplaySources(fileId),
+        realId ? fetchVidwishSources(realId, audio) : Promise.resolve(null)
+    ]);
+
+    const streams = [];
+    let subtitles = "", subtitlesHeaders = {}, allSubtitles = [];
+
+    const mega = megaResult.status === "fulfilled" ? megaResult.value : null;
+    if (mega) {
+        streams.push({ title: "Megaplay", streamUrl: mega.streamUrl, headers: mega.headers });
+        subtitles = mega.subtitles; subtitlesHeaders = mega.subtitlesHeaders;
+        allSubtitles.push(...mega.allSubtitles);
+    }
+
+    const vidwish = vidwishResult.status === "fulfilled" ? vidwishResult.value : null;
+    if (vidwish) {
+        streams.push({ title: "Vidplay", streamUrl: vidwish.streamUrl, headers: vidwish.headers });
+        if (!subtitles && vidwish.subtitles) { subtitles = vidwish.subtitles; subtitlesHeaders = vidwish.subtitlesHeaders; }
+        allSubtitles.push(...vidwish.allSubtitles);
+    }
+
+    if (streams.length === 0) {
+        console.log("[Direct] data-id found but getSources returned nothing usable");
+        return null;
+    }
+
+    console.log("[Direct] Resolved " + streams.length + " stream(s) via direct Megaplay/MAL lookup");
+    return { streams, subtitles, subtitlesHeaders, allSubtitles };
+}
+
+async function fetchMegaplaySources(fileId) {
+    const url = `${MEGAPLAY}/stream/getSources?id=${fileId}&id=${fileId}`;
+    const resp = await soraFetch(url, { headers: { "Referer": MEGAPLAY + "/", "User-Agent": UA, "X-Requested-With": "XMLHttpRequest" } });
+    if (!resp || resp.status !== 200 || typeof resp.json !== "function") return null;
+    let data;
+    try { data = await resp.json(); } catch (e) { return null; }
+    if (!data?.sources?.file) return null;
+    return buildStreamResult(data, MEGAPLAY + "/");
+}
+
+async function fetchVidwishSources(realId, audio) {
+    const embedUrl = `${VIDWISH}/stream/s-2/${realId}/${audio}`;
+    const embedResp = await soraFetch(embedUrl, { headers: { "Referer": VIDWISH + "/", "User-Agent": UA } });
+    if (!embedResp || embedResp.status !== 200) return null;
+    const embedHtml = await embedResp.text();
+    const fileId = embedHtml.match(/data-id="([^"]*)"/)?.[1];
+    if (!fileId) return null;
+
+    const url = `${VIDWISH}/stream/getSources?id=${fileId}&id=${fileId}`;
+    const resp = await soraFetch(url, { headers: { "Referer": VIDWISH + "/", "User-Agent": UA, "X-Requested-With": "XMLHttpRequest" } });
+    if (!resp || resp.status !== 200 || typeof resp.json !== "function") return null;
+    let data;
+    try { data = await resp.json(); } catch (e) { return null; }
+    if (!data?.sources?.file) return null;
+    return buildStreamResult(data, VIDWISH + "/");
+}
+
+// Shared subtitle/stream shaping — same contract used across both paths.
+function buildStreamResult(data, referer) {
+    const tracks = data.tracks || [];
+    let englishSub = "";
+    const engTrack = tracks.find(t => t.kind === "captions" && t.label && t.label.toLowerCase().includes("english"));
+    if (engTrack?.file) englishSub = engTrack.file;
+    else {
+        const firstCaption = tracks.find(t => t.kind === "captions" && t.file);
+        if (firstCaption) englishSub = firstCaption.file;
+    }
+    const allSubtitles = tracks.filter(t => t.file).map(t => ({
+        url: t.file, label: t.label || t.kind, kind: t.kind, headers: { Referer: referer }
+    }));
+    return {
+        streamUrl: data.sources.file,
+        subtitles: englishSub,
+        subtitlesHeaders: { Referer: referer },
+        allSubtitles,
+        headers: { Referer: referer }
+    };
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Fallback path — full Anikoto site scrape. Only used when the direct
+// Megaplay/MAL lookup finds nothing, or when AniList doesn't know the
+// episode count yet.
+// ══════════════════════════════════════════════════════════════════
+class AnikotoFallback {
+    static async findShow(title) {
+        const url = ANIKOTO_BASE + "/filter?keyword=" + encodeURIComponent(title);
+        console.log("[Fallback] Searching Anikoto: " + url);
+
+        const resp = await soraFetch(url, { headers: { "User-Agent": UA, "Referer": ANIKOTO_BASE + "/" } });
         if (!resp || resp.status !== 200) return null;
         const html = await resp.text();
 
-        const between = (str, a, b) => {
-            const p = str.indexOf(a);
-            if (p === -1) return "";
-            const start = p + a.length;
-            const end = str.indexOf(b, start);
-            return end === -1 ? str.slice(start) : str.slice(start, end);
-        };
-
-        const title = between(html, '<h1 class="user-select-none"><span style="user-select:text">', '</span>').trim();
-        const japanese = between(html, '<h2 class="japanese" style="font-weight:600">', '</h2>').trim();
-        const synopsis = between(html, '<div class="anime-synopsis">', '</div>')
-            .replace(/<br\s*\/?>/g, '\n')
-            .replace(/<\/?[^>]+(>|$)/g, '')
-            .trim();
-
-        const infoBlock = between(html, '<div class="col-sm-4 anime-info">', '</div>');
-        const getInfo = (label) => {
-            const regex = new RegExp("<strong>" + label + "[\\s\\S]*?<\\/p>", "i");
-            const match = infoBlock.match(regex);
-            if (!match) return "";
-            return match[0].replace(/<[^>]+>/g, "").replace(label, "").trim();
-        };
-
-        const type = getInfo("Type:");
-        const episodes = getInfo("Episode:");
-        const status = getInfo("Status:");
-        const duration = getInfo("Duration:");
-        const aired = getInfo("Aired:");
-        const season = getInfo("Season:");
-        const studio = getInfo("Studio:");
-        const genres = [...infoBlock.matchAll(/<a\s+href="[^"]*\/genre\/[^"]*"[^>]*>([^<]+)<\/a>/g)]
-            .map(m => m[1].trim());
-
-        const posterMatch = html.match(/<img\s+[^>]*data-src="([^"]+)"[^>]*class="lazyload"/);
-        const poster = posterMatch ? posterMatch[1] : "";
-
-        return { title, japanese, synopsis, type, episodes, status, duration, aired, season, studio, genres, poster };
+        const m = html.match(/<a[^>]+href="https:\/\/anikototv\.to\/watch\/([^"\/]+)"/);
+        if (!m) {
+            console.warn("[Fallback] No Anikoto match found for: " + title);
+            return null;
+        }
+        return m[1]; // slug
     }
 
-    // ---------- Get stream servers for an episode ----------
-    static async getServers(episodeSession) {
-        const url = "https://animepahetv.to/anime/get-servers/" + episodeSession;
-        console.log("[Anikoto] Fetching servers: " + url);
+    static async getShowId(slug) {
+        const url = ANIKOTO_BASE + "/watch/" + slug;
+        const resp = await soraFetch(url, { headers: { "User-Agent": UA, "Referer": ANIKOTO_BASE + "/" } });
+        if (!resp || resp.status !== 200) return null;
+        const html = await resp.text();
+        return html.match(/data-id="(\d+)"/)?.[1] || null;
+    }
 
+    static async getEpisodes(showId) {
+        const url = ANIKOTO_BASE + "/ajax/episode/list/" + showId;
         const resp = await soraFetch(url, {
-            headers: {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            headers: { "User-Agent": UA, "X-Requested-With": "XMLHttpRequest", "Referer": ANIKOTO_BASE + "/" }
+        });
+        if (!resp || resp.status !== 200 || typeof resp.json !== "function") return [];
+        let json;
+        try { json = await resp.json(); } catch (e) { return []; }
+        const html = json?.result || "";
+
+        const episodes = [];
+        const re = /<a\s[^>]*data-id="[^"]*"[^>]*>/g;
+        let m;
+        while ((m = re.exec(html)) !== null) {
+            const tag = m[0];
+            const g = (attr) => tag.match(new RegExp("data-" + attr + '="([^"]*)"'))?.[1] || "";
+            const num = g("num"), ids = g("ids");
+            if (!num || !ids) continue;
+            episodes.push({ num: parseInt(num, 10), hasDub: g("dub") === "1", ids });
+        }
+        return episodes;
+    }
+
+    static async getServerList(idsToken, audio) {
+        const url = ANIKOTO_BASE + "/ajax/server/list?servers=" + encodeURIComponent(idsToken);
+        const resp = await soraFetch(url, {
+            headers: { "User-Agent": UA, "X-Requested-With": "XMLHttpRequest", "Referer": ANIKOTO_BASE + "/" }
+        });
+        if (!resp || resp.status !== 200 || typeof resp.json !== "function") return [];
+        let json;
+        try { json = await resp.json(); } catch (e) { return []; }
+        const html = json?.result || "";
+
+        const items = [];
+        const typeRe = /<div class="type" data-type="(sub|dub)">([\s\S]*?)<\/ul>\s*<\/div>/g;
+        let typeM;
+        while ((typeM = typeRe.exec(html)) !== null) {
+            if (typeM[1] !== audio) continue;
+            for (const li of typeM[2].matchAll(/<li\s+([^>]*data-link-id[^>]*)>([\s\S]*?)<\/li>/g)) {
+                const linkId = li[1].match(/data-link-id="([^"]+)"/)?.[1];
+                const name = li[2].replace(/<[^>]+>/g, "").trim();
+                if (linkId) items.push({ linkId, name });
             }
+        }
+        return items;
+    }
+
+    static async resolveServer(linkId) {
+        const url = ANIKOTO_BASE + "/ajax/server?get=" + encodeURIComponent(linkId);
+        const resp = await soraFetch(url, {
+            headers: { "User-Agent": UA, "X-Requested-With": "XMLHttpRequest", "Referer": ANIKOTO_BASE + "/" }
         });
         if (!resp || resp.status !== 200 || typeof resp.json !== "function") return null;
         let json;
         try { json = await resp.json(); } catch (e) { return null; }
-        return json?.servers || [];
+        return json?.result?.url || null;
     }
 
-    // ---------- Extract Megaplay stream from server URL ----------
-    static async extractMegaplayStream(serverUrl) {
-        console.log("[Anikoto] Fetching Megaplay embed: " + serverUrl);
-        const resp = await soraFetch(serverUrl, {
-            headers: {
-                "Referer": "https://megaplay.buzz/",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-            }
-        });
-        if (!resp || resp.status !== 200) return null;
-        const html = await resp.text();
-
-        const dataIdMatch = html.match(/data-id="(\d+)"/);
-        if (!dataIdMatch) return null;
-        const dataId = dataIdMatch[1];
-
-        const sourcesUrl = "https://megaplay.buzz/stream/getSources?id=" + dataId + "&id=" + dataId;
-        console.log("[Anikoto] Fetching sources: " + sourcesUrl);
-        const srcResp = await soraFetch(sourcesUrl, {
-            headers: {
-                "Referer": "https://megaplay.buzz/",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-            }
-        });
-        if (!srcResp || srcResp.status !== 200 || typeof srcResp.json !== "function") return null;
-        let data;
-        try { data = await srcResp.json(); } catch (e) { return null; }
-        if (!data?.sources?.file) return null;
-
-        // Subtitle extraction
-        const tracks = data.tracks || [];
-        console.log("[Anikoto] Source tracks: " + JSON.stringify(tracks));
-
-        let englishSub = "";
-        const engTrack = tracks.find(t =>
-            t.kind === "captions" &&
-            t.label &&
-            t.label.toLowerCase().includes("english")
-        );
-        if (engTrack && engTrack.file) englishSub = engTrack.file;
-        else {
-            const firstCaption = tracks.find(t => t.kind === "captions" && t.file);
-            if (firstCaption) englishSub = firstCaption.file;
+    static async extractFromEmbed(embedUrl) {
+        if (embedUrl.includes("megaplay.buzz")) {
+            const fileId = await extractFileId(embedUrl, MEGAPLAY + "/");
+            if (!fileId) return null;
+            const resp = await soraFetch(`${MEGAPLAY}/stream/getSources?id=${fileId}&id=${fileId}`, {
+                headers: { "Referer": MEGAPLAY + "/", "User-Agent": UA, "X-Requested-With": "XMLHttpRequest" }
+            });
+            if (!resp || resp.status !== 200 || typeof resp.json !== "function") return null;
+            let data; try { data = await resp.json(); } catch (e) { return null; }
+            if (!data?.sources?.file) return null;
+            return buildStreamResult(data, MEGAPLAY + "/");
         }
-
-        // All subtitle tracks with required headers
-        const allSubtitles = tracks
-            .filter(t => t.file)
-            .map(t => ({
-                url: t.file,
-                label: t.label || t.kind,
-                kind: t.kind,
-                headers: { Referer: "https://megaplay.buzz/" }
-            }));
-
-        return {
-            streamUrl: data.sources.file,
-            subtitles: englishSub,
-            subtitlesHeaders: { Referer: "https://megaplay.buzz/" },
-            allSubtitles: allSubtitles,
-            headers: { Referer: "https://megaplay.buzz/" }
-        };
+        if (embedUrl.includes("vidwish.live")) {
+            const fileId = await extractFileId(embedUrl, VIDWISH + "/");
+            if (!fileId) return null;
+            const resp = await soraFetch(`${VIDWISH}/stream/getSources?id=${fileId}&id=${fileId}`, {
+                headers: { "Referer": VIDWISH + "/", "User-Agent": UA, "X-Requested-With": "XMLHttpRequest" }
+            });
+            if (!resp || resp.status !== 200 || typeof resp.json !== "function") return null;
+            let data; try { data = await resp.json(); } catch (e) { return null; }
+            if (!data?.sources?.file) return null;
+            return buildStreamResult(data, VIDWISH + "/");
+        }
+        console.warn("[Fallback] Unrecognized dub server host — no extractor for: " + embedUrl);
+        return null;
     }
 
-    static async extractVidplayStream(serverUrl) {
-        console.log("[Anikoto] Fetching Vidplay embed: " + serverUrl);
-        const resp = await soraFetch(serverUrl, {
-            headers: {
-                "Referer": "https://vidwish.live/",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-            }
-        });
-        if (!resp || resp.status !== 200) return null;
-        const html = await resp.text();
-
-        const dataIdMatch = html.match(/data-id="(\d+)"/);
-        if (!dataIdMatch) return null;
-        const dataId = dataIdMatch[1];
-
-        const sourcesUrl = "https://vidwish.live/stream/getSources?id=" + dataId + "&id=" + dataId;
-        console.log("[Anikoto] Fetching Vidplay sources: " + sourcesUrl);
-        const srcResp = await soraFetch(sourcesUrl, {
-            headers: {
-                "Referer": serverUrl,
-                "X-Requested-With": "XMLHttpRequest",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-            }
-        });
-        if (!srcResp || srcResp.status !== 200 || typeof srcResp.json !== "function") {
-            console.warn("[Anikoto] Vidplay getSources failed — status: " + (srcResp ? srcResp.status : "null"));
-            return null;
-        }
-        let data;
-        try { data = await srcResp.json(); } catch (e) {
-            console.warn("[Anikoto] Vidplay getSources JSON parse failed: " + e);
-            return null;
-        }
-        if (!data?.sources?.file) {
-            console.warn("[Anikoto] Vidplay getSources returned no file — keys: " + JSON.stringify(Object.keys(data || {})) + ", sources: " + JSON.stringify(data?.sources));
+    // Resolves via the full chain: search -> showId -> episode list -> per-episode
+    // ids token -> dub server list -> resolve each token -> extract.
+    static async resolve(title, epNum) {
+        const slug = await AnikotoFallback.findShow(title);
+        if (!slug) return null;
+        const showId = await AnikotoFallback.getShowId(slug);
+        if (!showId) return null;
+        const episodes = await AnikotoFallback.getEpisodes(showId);
+        const ep = episodes.find(e => e.num === epNum);
+        if (!ep || !ep.hasDub) {
+            console.warn("[Fallback] Anikoto has no dub for episode " + epNum + " either");
             return null;
         }
 
-        const tracks = data.tracks || [];
-        console.log("[Anikoto] Vidplay tracks: " + JSON.stringify(tracks));
+        const dubServers = await AnikotoFallback.getServerList(ep.ids, "dub");
+        if (dubServers.length === 0) return null;
 
-        let englishSub = "";
-        const engTrack = tracks.find(t =>
-            t.kind === "captions" &&
-            t.label &&
-            t.label.toLowerCase().includes("english")
-        );
-        if (engTrack && engTrack.file) englishSub = engTrack.file;
-        else {
-            const firstCaption = tracks.find(t => t.kind === "captions" && t.file);
-            if (firstCaption) englishSub = firstCaption.file;
-        }
-
-        const allSubtitles = tracks
-            .filter(t => t.file)
-            .map(t => ({
-                url: t.file,
-                label: t.label || t.kind,
-                kind: t.kind,
-                headers: { Referer: "https://vidwish.live/" }
-            }));
-
-        return {
-            streamUrl: data.sources.file,
-            subtitles: englishSub,
-            subtitlesHeaders: { Referer: "https://vidwish.live/" },
-            allSubtitles: allSubtitles,
-            headers: { Referer: "https://vidwish.live/" }
-        };
-    }
-}
-
-async function extractStreamUrl(url) {
-    try {
-        const match = url.match(/anime\/([^\/]+)\/([^?]+)\?num=(\d+)/);
-        if (!match) throw new Error("Invalid URL format");
-        const [, animeSession, episodeSession, epNum] = match;
-
-        console.log("[Anikoto] Anime: " + animeSession + ", Episode: " + epNum + ", Session: " + episodeSession);
-
-        const servers = await Anikoto.getServers(episodeSession);
-        if (!servers || servers.length === 0) {
-            console.warn("[extractStreamUrl] No servers found");
-            return JSON.stringify({ streams: [], subtitles: "", subtitlesHeaders: {}, allSubtitles: [] });
-        }
-
-        // Any server whose name marks it as dub — not limited to known hosts
-        const dubServers = servers.filter(s => s.name && s.name.includes("Dub"));
-
-        if (dubServers.length === 0) {
-            console.warn("[extractStreamUrl] No dub servers available for this episode");
-            return JSON.stringify({ streams: [], subtitles: "", subtitlesHeaders: {}, allSubtitles: [] });
-        }
-
-        // Helper functions (return allSubtitles too)
-        async function fetchMegaplayStream(server) {
-            const streamData = await Anikoto.extractMegaplayStream(server.url);
+        const results = await Promise.allSettled(dubServers.map(async (server) => {
+            const embedUrl = await AnikotoFallback.resolveServer(server.linkId);
+            if (!embedUrl) return null;
+            const streamData = await AnikotoFallback.extractFromEmbed(embedUrl);
             if (!streamData) return null;
-            return {
-                title: "Megaplay",
-                streamUrl: streamData.streamUrl,
-                headers: streamData.headers,
-                subtitles: streamData.subtitles,
-                subtitlesHeaders: streamData.subtitlesHeaders,
-                allSubtitles: streamData.allSubtitles
-            };
-        }
-
-        async function fetchVidplayStream(server) {
-            const streamData = await Anikoto.extractVidplayStream(server.url);
-            if (!streamData) return null;
-            return {
-                title: "Vidplay",
-                streamUrl: streamData.streamUrl,
-                headers: streamData.headers,
-                subtitles: streamData.subtitles,
-                subtitlesHeaders: streamData.subtitlesHeaders,
-                allSubtitles: streamData.allSubtitles
-            };
-        }
-
-        // Route each dub server to its extractor by name; flag anything unrecognized
-        // instead of silently dropping it, so a new host shows up in logs.
-        const fetchPromises = dubServers.map(server => {
-            if (server.name === "Dub-Megaplay") return fetchMegaplayStream(server);
-            if (server.name.includes("Vidplay")) return fetchVidplayStream(server);
-            console.warn("[extractStreamUrl] Unrecognized dub server \"" + server.name + "\" (" + server.url + ") — no extractor for this host yet");
-            return Promise.resolve(null);
-        });
-
-        const results = await Promise.allSettled(fetchPromises);
+            return { title: server.name, ...streamData };
+        }));
 
         const streams = [];
-        let subtitles = "";
-        let subtitlesHeaders = {};
-        let allSubtitles = [];
-
+        let subtitles = "", subtitlesHeaders = {}, allSubtitles = [];
         for (const r of results) {
             if (r.status !== "fulfilled" || !r.value) continue;
             const s = r.value;
             streams.push({ title: s.title, streamUrl: s.streamUrl, headers: s.headers });
-            if (!subtitles && s.subtitles) {
-                subtitles = s.subtitles;
-                subtitlesHeaders = s.subtitlesHeaders;
-            }
-            if (s.allSubtitles?.length) {
-                allSubtitles.push(...s.allSubtitles);
-            }
+            if (!subtitles && s.subtitles) { subtitles = s.subtitles; subtitlesHeaders = s.subtitlesHeaders; }
+            if (s.allSubtitles?.length) allSubtitles.push(...s.allSubtitles);
         }
+        if (streams.length === 0) return null;
 
-        // De-duplicate subtitle tracks (same url) across providers
-        const seenSub = {};
-        allSubtitles = allSubtitles.filter(t => {
-            if (!t.url || seenSub[t.url]) return false;
-            seenSub[t.url] = true;
-            return true;
-        });
+        console.log("[Fallback] Resolved " + streams.length + " stream(s) via full Anikoto scrape chain");
+        return { streams, subtitles, subtitlesHeaders, allSubtitles };
+    }
 
-        const result = JSON.stringify({ streams, subtitles, subtitlesHeaders, allSubtitles });
-        console.log("[extractStreamUrl] Result: " + result.substring(0, 300));
-        return result;
-
-    } catch (error) {
-        console.log("[extractStreamUrl] Fetch error: " + error);
-        return JSON.stringify({ streams: [], subtitles: "", subtitlesHeaders: {}, allSubtitles: [] });
+    // Only used when AniList doesn't know the episode count.
+    static async getEpisodeCount(title) {
+        const slug = await AnikotoFallback.findShow(title);
+        if (!slug) return null;
+        const showId = await AnikotoFallback.getShowId(slug);
+        if (!showId) return null;
+        const episodes = await AnikotoFallback.getEpisodes(showId);
+        const dubEpisodes = episodes.filter(e => e.hasDub).map(e => e.num);
+        return dubEpisodes.length ? Math.max(...dubEpisodes) : null;
     }
 }
 
-// ─── Search Results ───
+async function extractFileId(embedUrl, referer) {
+    const resp = await soraFetch(embedUrl, { headers: { "Referer": referer, "User-Agent": UA } });
+    if (!resp || resp.status !== 200) return null;
+    const html = await resp.text();
+    return html.match(/data-id="([^"]*)"/)?.[1] || null;
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Shirox entry points
+// ══════════════════════════════════════════════════════════════════
 async function searchResults(keyword) {
     try {
         console.log("[searchResults] Keyword: " + keyword);
-        const items = await Anikoto.search(keyword);
+        const items = await AniList.search(keyword);
         if (!items) return JSON.stringify([{ title: "Error", image: "", href: "" }]);
 
         const transformed = items.map(item => ({
-            title: item.title || "Untitled",
-            image: item.poster || "",
-            href: "anime/" + item.session
+            title: item.title,
+            image: item.poster,
+            href: "anime/" + item.malId + "?title=" + encodeURIComponent(item.title) + "&eps=" + (item.episodes ?? "")
         }));
 
-        console.log("Transformed Results: " + JSON.stringify(transformed));
         return JSON.stringify(transformed);
     } catch (error) {
         console.log("[searchResults] Fetch error: " + error);
@@ -468,53 +349,94 @@ async function searchResults(keyword) {
     }
 }
 
-// ─── Extract Details ───
 async function extractDetails(url) {
+    // AniList search doesn't return synopsis; kept minimal rather than
+    // adding a second AniList call this module doesn't otherwise need.
     try {
-        const match = url.match(/anime\/([^\/]+)/);
+        const match = url.match(/anime\/(\d+)\?title=([^&]+)&eps=(\d*)/);
         if (!match) throw new Error("Invalid URL format");
-        const session = match[1];
-        const details = await Anikoto.getDetails(session);
-        if (!details) throw new Error("Could not fetch details");
-
-        const transformed = [{
-            description: details.synopsis || "No description available",
-            aliases: "Duration: " + (details.duration || "Unknown"),
-            airdate: "Aired: " + (details.aired || "Unknown")
-        }];
-
-        console.log(JSON.stringify(transformed));
-        return JSON.stringify(transformed);
+        const [, , titleEncoded, eps] = match;
+        return JSON.stringify([{
+            description: decodeURIComponent(titleEncoded),
+            aliases: eps ? "Episodes: " + eps : "Episodes: Unknown",
+            airdate: "Aired: Unknown"
+        }]);
     } catch (error) {
         console.log("Details error: " + error);
-        return JSON.stringify([{
-            description: "Error loading description",
-            aliases: "Duration: Unknown",
-            airdate: "Aired/Released: Unknown"
-        }]);
+        return JSON.stringify([{ description: "Error loading description", aliases: "", airdate: "" }]);
     }
 }
 
-// ─── Extract Episodes ───
 async function extractEpisodes(url) {
     try {
-        const match = url.match(/anime\/([^\/]+)/);
+        const match = url.match(/anime\/(\d+)\?title=([^&]+)&eps=(\d*)/);
         if (!match) throw new Error("Invalid URL format");
-        const session = match[1];
-        const episodesData = await Anikoto.getEpisodes(session);
-        if (!episodesData) return JSON.stringify([]);
+        const [, malId, titleEncoded, epsStr] = match;
+        const title = decodeURIComponent(titleEncoded);
 
-        const sorted = episodesData.sort((a, b) => a.episode - b.episode);
-        const episodesArray = sorted.map(ep => ({
-            href: "anime/" + session + "/" + ep.session + "?num=" + ep.episode,
-            number: ep.episode,
-            title: ep.title || "Episode " + ep.episode
-        }));
+        let epCount = epsStr ? parseInt(epsStr, 10) : null;
+        if (!epCount) {
+            console.log("[extractEpisodes] AniList episode count unknown — checking Anikoto");
+            epCount = await AnikotoFallback.getEpisodeCount(title);
+        }
+        if (!epCount) {
+            console.warn("[extractEpisodes] Could not determine episode count for: " + title);
+            return JSON.stringify([]);
+        }
 
+        const episodesArray = [];
+        for (let n = 1; n <= epCount; n++) {
+            episodesArray.push({
+                href: "anime/" + malId + "/" + n + "?title=" + encodeURIComponent(title),
+                number: n,
+                title: "Episode " + n
+            });
+        }
         return JSON.stringify(episodesArray);
     } catch (error) {
         console.log("Fetch error in extractEpisodes: " + error);
         return JSON.stringify([]);
+    }
+}
+
+async function extractStreamUrl(url) {
+    try {
+        const match = url.match(/anime\/(\d+)\/(\d+)\?title=([^&]+)/);
+        if (!match) throw new Error("Invalid URL format");
+        const [, malId, epNumStr, titleEncoded] = match;
+        const epNum = parseInt(epNumStr, 10);
+        const title = decodeURIComponent(titleEncoded);
+
+        console.log("[extractStreamUrl] MAL: " + malId + ", Episode: " + epNum + ", Title: " + title);
+
+        // Primary: direct Megaplay/MAL lookup, no Anikoto involvement.
+        let result = await tryMegaplayDirect(malId, epNum, "dub");
+
+        // Fallback: full Anikoto scrape chain.
+        if (!result) {
+            console.log("[extractStreamUrl] Direct lookup empty — falling back to Anikoto");
+            result = await AnikotoFallback.resolve(title, epNum);
+        }
+
+        if (!result) {
+            console.warn("[extractStreamUrl] No dub found via either path");
+            return JSON.stringify({ streams: [], subtitles: "", subtitlesHeaders: {}, allSubtitles: [] });
+        }
+
+        // De-duplicate subtitle tracks across providers
+        const seenSub = {};
+        result.allSubtitles = result.allSubtitles.filter(t => {
+            if (!t.url || seenSub[t.url]) return false;
+            seenSub[t.url] = true;
+            return true;
+        });
+
+        const out = JSON.stringify(result);
+        console.log("[extractStreamUrl] Result: " + out.substring(0, 300));
+        return out;
+    } catch (error) {
+        console.log("[extractStreamUrl] Fetch error: " + error);
+        return JSON.stringify({ streams: [], subtitles: "", subtitlesHeaders: {}, allSubtitles: [] });
     }
 }
 
