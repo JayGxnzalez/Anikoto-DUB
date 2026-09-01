@@ -197,34 +197,69 @@ function buildStreamResult(data, referer) {
 // episode count yet.
 // ══════════════════════════════════════════════════════════════════
 class AnikotoFallback {
+    // Confirmed live: real results live in #list-items. The page also
+    // carries a "Top rated anime" sidebar using the identical
+    // <a class="item" href=".../watch/..."> pattern — unscoped matching
+    // grabbed an entry from that sidebar instead of an actual search
+    // result. Also: "take the first match" is wrong even within real
+    // results, since a title search can return multiple same-franchise
+    // entries (specials, movies, spinoff arcs) — real title matching is
+    // needed. Each result item also carries its numeric show ID directly
+    // via data-tip, so this returns it without a separate watch-page fetch.
     static async findShow(title) {
         const url = ANIKOTO_BASE + "/filter?keyword=" + encodeURIComponent(title);
         console.log("[Fallback] Searching Anikoto: " + url);
 
         const resp = await soraFetch(url, { headers: { "User-Agent": UA, "Referer": ANIKOTO_BASE + "/" } });
-        if (!resp || resp.status !== 200) return null;
-        const html = await resp.text();
-
-        const m = html.match(/<a[^>]+href="https:\/\/anikototv\.to\/watch\/([^"\/]+)"/);
-        if (!m) {
-            console.warn("[Fallback] No Anikoto match found for: " + title);
+        if (!resp || resp.status !== 200) {
+            console.error("[Fallback] Search fetch failed, status: " + (resp ? resp.status : "null"));
             return null;
         }
-        console.log("[Fallback] Matched slug: " + m[1] + " for title: " + title);
-        return m[1]; // slug
-    }
-
-    static async getShowId(slug) {
-        const url = ANIKOTO_BASE + "/watch/" + slug;
-        const resp = await soraFetch(url, { headers: { "User-Agent": UA, "Referer": ANIKOTO_BASE + "/" } });
-        if (!resp || resp.status !== 200) return null;
         const html = await resp.text();
-        const allIds = [...html.matchAll(/data-id="(\d+)"/g)].slice(0, 8).map(m => m[1]);
-        console.log("[Fallback] First data-id values on /watch/" + slug + ": " + JSON.stringify(allIds));
-        return allIds[0] || null;
+
+        const gridStart = html.indexOf('id="list-items"');
+        if (gridStart === -1) {
+            console.warn("[Fallback] No results grid found for: " + title);
+            return null;
+        }
+        const gridEndMarker = html.indexOf("pre-pagination", gridStart);
+        const gridHtml = gridEndMarker === -1 ? html.slice(gridStart) : html.slice(gridStart, gridEndMarker);
+
+        const blocks = gridHtml.split('<div class="item ">').slice(1);
+        if (blocks.length === 0) {
+            console.warn("[Fallback] No search results found for: " + title);
+            return null;
+        }
+
+        const candidates = [];
+        for (const block of blocks) {
+            const slugMatch = block.match(/href="https:\/\/anikototv\.to\/watch\/([^"\/]+)\/ep-\d+"/);
+            const tipMatch = block.match(/data-tip="(\d+)"/);
+            const titleMatch = block.match(/data-jp="([^"]*)"/);
+            if (!slugMatch || !tipMatch) continue;
+            candidates.push({
+                slug: slugMatch[1],
+                showId: tipMatch[1],
+                title: titleMatch ? titleMatch[1] : ""
+            });
+        }
+        if (candidates.length === 0) {
+            console.warn("[Fallback] Could not parse any results for: " + title);
+            return null;
+        }
+
+        const normalize = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        const wantedNorm = normalize(title);
+        const exact = candidates.find(c => normalize(c.title) === wantedNorm);
+        const chosen = exact || candidates[0];
+
+        console.log("[Fallback] Matched: \"" + chosen.title + "\" (slug: " + chosen.slug + ", showId: " + chosen.showId + ") for search: " + title
+            + (exact ? "" : " [no exact title match among " + candidates.length + " results — using first]"));
+
+        return chosen; // { slug, showId, title }
     }
 
-    static async getEpisodes(showId) {
+    static async getEpisodes(showId, expectedMalId) {
         const url = ANIKOTO_BASE + "/ajax/episode/list/" + showId;
         const resp = await soraFetch(url, {
             headers: { "User-Agent": UA, "X-Requested-With": "XMLHttpRequest", "Referer": ANIKOTO_BASE + "/" }
@@ -251,8 +286,20 @@ class AnikotoFallback {
             const g = (attr) => tag.match(new RegExp("data-" + attr + '="([^"]*)"'))?.[1] || "";
             const num = g("num"), ids = g("ids");
             if (!num || !ids) continue;
-            episodes.push({ num: parseInt(num, 10), hasDub: g("dub") === "1", ids });
+            episodes.push({ num: parseInt(num, 10), hasDub: g("dub") === "1", ids, mal: g("mal") });
         }
+
+        // Cross-check: every episode carries its own data-mal attribute. If it
+        // doesn't match what AniList told us to look for, findShow() matched
+        // the wrong anime — bail rather than silently serving the wrong show.
+        if (expectedMalId && episodes.length > 0) {
+            const actualMal = episodes.find(e => e.mal)?.mal;
+            if (actualMal && String(actualMal) !== String(expectedMalId)) {
+                console.warn("[Fallback] Show mismatch — expected MAL id " + expectedMalId + " but episode list belongs to MAL id " + actualMal + ". findShow() likely matched the wrong anime.");
+                return [];
+            }
+        }
+
         console.log("[Fallback] Parsed " + episodes.length + " episodes for showId " + showId + ", dub count: " + episodes.filter(e => e.hasDub).length);
         return episodes;
     }
@@ -321,12 +368,10 @@ class AnikotoFallback {
 
     // Resolves via the full chain: search -> showId -> episode list -> per-episode
     // ids token -> dub server list -> resolve each token -> extract.
-    static async resolve(title, epNum) {
-        const slug = await AnikotoFallback.findShow(title);
-        if (!slug) return null;
-        const showId = await AnikotoFallback.getShowId(slug);
-        if (!showId) return null;
-        const episodes = await AnikotoFallback.getEpisodes(showId);
+    static async resolve(title, epNum, expectedMalId) {
+        const show = await AnikotoFallback.findShow(title);
+        if (!show) return null;
+        const episodes = await AnikotoFallback.getEpisodes(show.showId, expectedMalId);
         const ep = episodes.find(e => e.num === epNum);
         if (!ep || !ep.hasDub) {
             console.warn("[Fallback] Anikoto has no dub for episode " + epNum + " either");
@@ -360,12 +405,10 @@ class AnikotoFallback {
     }
 
     // Only used when AniList doesn't know the episode count.
-    static async getEpisodeCount(title) {
-        const slug = await AnikotoFallback.findShow(title);
-        if (!slug) return null;
-        const showId = await AnikotoFallback.getShowId(slug);
-        if (!showId) return null;
-        const episodes = await AnikotoFallback.getEpisodes(showId);
+    static async getEpisodeCount(title, expectedMalId) {
+        const show = await AnikotoFallback.findShow(title);
+        if (!show) return null;
+        const episodes = await AnikotoFallback.getEpisodes(show.showId, expectedMalId);
         const dubEpisodes = episodes.filter(e => e.hasDub).map(e => e.num);
         return dubEpisodes.length ? Math.max(...dubEpisodes) : null;
     }
@@ -439,7 +482,7 @@ async function extractEpisodes(url) {
         let epCount = epsStr ? parseInt(epsStr, 10) : null;
         if (!epCount) {
             console.log("[extractEpisodes] AniList episode count unknown — checking Anikoto");
-            epCount = await AnikotoFallback.getEpisodeCount(title);
+            epCount = await AnikotoFallback.getEpisodeCount(title, malId);
         }
         if (!epCount) {
             console.warn("[extractEpisodes] Could not determine episode count for: " + title);
@@ -486,7 +529,7 @@ async function extractStreamUrl(url) {
             console.log(result
                 ? "[extractStreamUrl] Direct lookup had no subtitles — also trying Anikoto for fuller coverage"
                 : "[extractStreamUrl] Direct lookup empty — falling back to Anikoto");
-            const fallbackResult = await AnikotoFallback.resolve(title, epNum);
+            const fallbackResult = await AnikotoFallback.resolve(title, epNum, malId);
             if (fallbackResult) {
                 if (result) {
                     const existingUrls = new Set(result.streams.map(s => s.streamUrl));
