@@ -1,6 +1,7 @@
 const ANIKOTO_BASE = "https://anikototv.to";
 const MEGAPLAY = "https://megaplay.buzz";
 const VIDWISH = "https://vidwish.live";
+const VIDTUBE = "https://vidtube.site";
 const ANILIST_API = "https://graphql.anilist.co";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
@@ -339,31 +340,34 @@ class AnikotoFallback {
         return json?.result?.url || null;
     }
 
+    // megaplay.buzz and vidwish.live share the same embed template
+    // (data-id attribute + /stream/getSources?id= endpoint) — confirmed
+    // live. vidtube.site's embed page looked like the same template by
+    // title/warning text, but its real API differs: the endpoint is
+    // /stream/getSourcesNew (not getSources) and requires an explicit
+    // type=dub param — confirmed live. Response shape (sources.file,
+    // tracks[]) is identical across all three, so buildStreamResult()
+    // is unchanged; only the request URL branches per host.
     static async extractFromEmbed(embedUrl) {
-        if (embedUrl.includes("megaplay.buzz")) {
-            const fileId = await extractFileId(embedUrl, MEGAPLAY + "/");
-            if (!fileId) return null;
-            const resp = await soraFetch(`${MEGAPLAY}/stream/getSources?id=${fileId}&id=${fileId}`, {
-                headers: { "Referer": MEGAPLAY + "/", "User-Agent": UA, "X-Requested-With": "XMLHttpRequest" }
-            });
-            if (!resp || resp.status !== 200 || typeof resp.json !== "function") return null;
-            let data; try { data = await resp.json(); } catch (e) { return null; }
-            if (!data?.sources?.file) return null;
-            return buildStreamResult(data, MEGAPLAY + "/");
+        const host = [MEGAPLAY, VIDWISH, VIDTUBE].find(h => embedUrl.includes(h.replace("https://", "")));
+        if (!host) {
+            console.warn("[Fallback] Unrecognized dub server host — no extractor for: " + embedUrl);
+            return null;
         }
-        if (embedUrl.includes("vidwish.live")) {
-            const fileId = await extractFileId(embedUrl, VIDWISH + "/");
-            if (!fileId) return null;
-            const resp = await soraFetch(`${VIDWISH}/stream/getSources?id=${fileId}&id=${fileId}`, {
-                headers: { "Referer": VIDWISH + "/", "User-Agent": UA, "X-Requested-With": "XMLHttpRequest" }
-            });
-            if (!resp || resp.status !== 200 || typeof resp.json !== "function") return null;
-            let data; try { data = await resp.json(); } catch (e) { return null; }
-            if (!data?.sources?.file) return null;
-            return buildStreamResult(data, VIDWISH + "/");
-        }
-        console.warn("[Fallback] Unrecognized dub server host — no extractor for: " + embedUrl);
-        return null;
+        const fileId = await extractFileId(embedUrl, host + "/");
+        if (!fileId) return null;
+
+        const sourcesUrl = host === VIDTUBE
+            ? `${host}/stream/getSourcesNew?id=${fileId}&type=dub&id=${fileId}&type=dub`
+            : `${host}/stream/getSources?id=${fileId}&id=${fileId}`;
+
+        const resp = await soraFetch(sourcesUrl, {
+            headers: { "Referer": host + "/", "User-Agent": UA, "X-Requested-With": "XMLHttpRequest" }
+        });
+        if (!resp || resp.status !== 200 || typeof resp.json !== "function") return null;
+        let data; try { data = await resp.json(); } catch (e) { return null; }
+        if (!data?.sources?.file) return null;
+        return buildStreamResult(data, host + "/");
     }
 
     // Resolves via the full chain: search -> showId -> episode list -> per-episode
