@@ -210,6 +210,7 @@ class AnikotoFallback {
             console.warn("[Fallback] No Anikoto match found for: " + title);
             return null;
         }
+        console.log("[Fallback] Matched slug: " + m[1] + " for title: " + title);
         return m[1]; // slug
     }
 
@@ -218,7 +219,9 @@ class AnikotoFallback {
         const resp = await soraFetch(url, { headers: { "User-Agent": UA, "Referer": ANIKOTO_BASE + "/" } });
         if (!resp || resp.status !== 200) return null;
         const html = await resp.text();
-        return html.match(/data-id="(\d+)"/)?.[1] || null;
+        const allIds = [...html.matchAll(/data-id="(\d+)"/g)].slice(0, 8).map(m => m[1]);
+        console.log("[Fallback] First data-id values on /watch/" + slug + ": " + JSON.stringify(allIds));
+        return allIds[0] || null;
     }
 
     static async getEpisodes(showId) {
@@ -226,10 +229,19 @@ class AnikotoFallback {
         const resp = await soraFetch(url, {
             headers: { "User-Agent": UA, "X-Requested-With": "XMLHttpRequest", "Referer": ANIKOTO_BASE + "/" }
         });
-        if (!resp || resp.status !== 200 || typeof resp.json !== "function") return [];
+        if (!resp || resp.status !== 200 || typeof resp.json !== "function") {
+            console.warn("[Fallback] Episode list fetch failed for showId " + showId + ", status: " + (resp ? resp.status : "null"));
+            return [];
+        }
         let json;
-        try { json = await resp.json(); } catch (e) { return []; }
+        try { json = await resp.json(); } catch (e) {
+            console.warn("[Fallback] Episode list JSON parse failed for showId " + showId);
+            return [];
+        }
         const html = json?.result || "";
+        if (!html) {
+            console.warn("[Fallback] Episode list result HTML was empty for showId " + showId);
+        }
 
         const episodes = [];
         const re = /<a\s[^>]*data-id="[^"]*"[^>]*>/g;
@@ -241,6 +253,7 @@ class AnikotoFallback {
             if (!num || !ids) continue;
             episodes.push({ num: parseInt(num, 10), hasDub: g("dub") === "1", ids });
         }
+        console.log("[Fallback] Parsed " + episodes.length + " episodes for showId " + showId + ", dub count: " + episodes.filter(e => e.hasDub).length);
         return episodes;
     }
 
