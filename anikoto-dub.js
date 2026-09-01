@@ -328,7 +328,7 @@ async function extractStreamUrl(url) {
         // Vidplay entries (e.g. "Vidstream-2") that's just noise here —
         // strip it. HD-1/HD-2 are left untouched since the number there
         // is meaningful (distinguishes two real, different servers).
-        const cleanLabel = (name) => name.replace(/^(Vidstream|Vidplay)-\d+$/, "$1");
+        const cleanLabel = (name) => name.replace(/^(Vidstream|Vidplay)-\d+$/i, "$1");
 
         const results = await Promise.allSettled(dubServers.map(async (server) => {
             const embedUrl = await Anikoto.resolveServer(server.linkId);
