@@ -518,35 +518,17 @@ async function extractStreamUrl(url) {
 
         console.log("[extractStreamUrl] MAL: " + malId + ", Episode: " + epNum + ", Title: " + title);
 
-        // Always gather from both paths in parallel — direct Megaplay/MAL
-        // lookup and the full Anikoto scrape chain (which itself resolves
-        // every dub server Anikoto's own list has: Megaplay, Vidplay,
-        // VidTube, etc.) — then merge everything found, rather than only
-        // falling back conditionally. Running them concurrently keeps this
-        // close to the cost of the slower of the two paths, not the sum.
-        const [directResult, fallbackResult] = await Promise.allSettled([
-            tryMegaplayDirect(malId, epNum, "dub"),
-            AnikotoFallback.resolve(title, epNum, malId)
-        ]);
+        // Primary: scrape Anikoto's own site for this exact episode, same
+        // as every other module — real servers currently on the page
+        // (Megaplay, Vidplay, VidTube, whatever's live), not a guess.
+        let result = await AnikotoFallback.resolve(title, epNum, malId);
 
-        const direct = directResult.status === "fulfilled" ? directResult.value : null;
-        const fallback = fallbackResult.status === "fulfilled" ? fallbackResult.value : null;
-
-        let result = null;
-        if (direct && fallback) {
-            const existingUrls = new Set(direct.streams.map(s => s.streamUrl));
-            for (const s of fallback.streams) {
-                if (!existingUrls.has(s.streamUrl)) direct.streams.push(s);
-            }
-            if (!direct.subtitles && fallback.subtitles) {
-                direct.subtitles = fallback.subtitles;
-                direct.subtitlesHeaders = fallback.subtitlesHeaders;
-            }
-            direct.allSubtitles.push(...fallback.allSubtitles);
-            result = direct;
-            console.log("[extractStreamUrl] Merged direct + fallback: " + result.streams.length + " total stream(s)");
-        } else {
-            result = direct || fallback;
+        // Fallback: only if Anikoto genuinely has nothing for this episode
+        // (title didn't match cleanly, or the show truly has no dub there
+        // yet) — try the direct Megaplay/MAL shortcut as a last resort.
+        if (!result) {
+            console.log("[extractStreamUrl] Anikoto scrape found nothing — trying direct Megaplay/MAL as fallback");
+            result = await tryMegaplayDirect(malId, epNum, "dub");
         }
 
         if (!result) {
