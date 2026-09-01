@@ -461,10 +461,34 @@ async function extractStreamUrl(url) {
         // Primary: direct Megaplay/MAL lookup, no Anikoto involvement.
         let result = await tryMegaplayDirect(malId, epNum, "dub");
 
-        // Fallback: full Anikoto scrape chain.
-        if (!result) {
-            console.log("[extractStreamUrl] Direct lookup empty — falling back to Anikoto");
-            result = await AnikotoFallback.resolve(title, epNum);
+        // The direct MAL-keyed lookup can land on a different CDN backend
+        // than Anikoto's own server list resolves to — sometimes with no
+        // subtitle tracks bundled, even though the video itself is fine.
+        // If that happens, pull in Anikoto's fallback too: keep the direct
+        // stream(s) that already work, merge in any additional streams and
+        // subtitles the fallback finds, rather than accepting a sub-less
+        // result or discarding a working stream.
+        const needsFallback = !result || result.allSubtitles.length === 0;
+        if (needsFallback) {
+            console.log(result
+                ? "[extractStreamUrl] Direct lookup had no subtitles — also trying Anikoto for fuller coverage"
+                : "[extractStreamUrl] Direct lookup empty — falling back to Anikoto");
+            const fallbackResult = await AnikotoFallback.resolve(title, epNum);
+            if (fallbackResult) {
+                if (result) {
+                    const existingUrls = new Set(result.streams.map(s => s.streamUrl));
+                    for (const s of fallbackResult.streams) {
+                        if (!existingUrls.has(s.streamUrl)) result.streams.push(s);
+                    }
+                    if (!result.subtitles && fallbackResult.subtitles) {
+                        result.subtitles = fallbackResult.subtitles;
+                        result.subtitlesHeaders = fallbackResult.subtitlesHeaders;
+                    }
+                    result.allSubtitles.push(...fallbackResult.allSubtitles);
+                } else {
+                    result = fallbackResult;
+                }
+            }
         }
 
         if (!result) {
