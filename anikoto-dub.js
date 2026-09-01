@@ -518,37 +518,35 @@ async function extractStreamUrl(url) {
 
         console.log("[extractStreamUrl] MAL: " + malId + ", Episode: " + epNum + ", Title: " + title);
 
-        // Primary: direct Megaplay/MAL lookup, no Anikoto involvement.
-        let result = await tryMegaplayDirect(malId, epNum, "dub");
+        // Always gather from both paths in parallel — direct Megaplay/MAL
+        // lookup and the full Anikoto scrape chain (which itself resolves
+        // every dub server Anikoto's own list has: Megaplay, Vidplay,
+        // VidTube, etc.) — then merge everything found, rather than only
+        // falling back conditionally. Running them concurrently keeps this
+        // close to the cost of the slower of the two paths, not the sum.
+        const [directResult, fallbackResult] = await Promise.allSettled([
+            tryMegaplayDirect(malId, epNum, "dub"),
+            AnikotoFallback.resolve(title, epNum, malId)
+        ]);
 
-        // The direct MAL-keyed lookup can land on a different CDN backend
-        // than Anikoto's own server list resolves to — sometimes with no
-        // subtitle tracks bundled, even though the video itself is fine.
-        // If that happens, pull in Anikoto's fallback too: keep the direct
-        // stream(s) that already work, merge in any additional streams and
-        // subtitles the fallback finds, rather than accepting a sub-less
-        // result or discarding a working stream.
-        const needsFallback = !result || result.allSubtitles.length === 0;
-        if (needsFallback) {
-            console.log(result
-                ? "[extractStreamUrl] Direct lookup had no subtitles — also trying Anikoto for fuller coverage"
-                : "[extractStreamUrl] Direct lookup empty — falling back to Anikoto");
-            const fallbackResult = await AnikotoFallback.resolve(title, epNum, malId);
-            if (fallbackResult) {
-                if (result) {
-                    const existingUrls = new Set(result.streams.map(s => s.streamUrl));
-                    for (const s of fallbackResult.streams) {
-                        if (!existingUrls.has(s.streamUrl)) result.streams.push(s);
-                    }
-                    if (!result.subtitles && fallbackResult.subtitles) {
-                        result.subtitles = fallbackResult.subtitles;
-                        result.subtitlesHeaders = fallbackResult.subtitlesHeaders;
-                    }
-                    result.allSubtitles.push(...fallbackResult.allSubtitles);
-                } else {
-                    result = fallbackResult;
-                }
+        const direct = directResult.status === "fulfilled" ? directResult.value : null;
+        const fallback = fallbackResult.status === "fulfilled" ? fallbackResult.value : null;
+
+        let result = null;
+        if (direct && fallback) {
+            const existingUrls = new Set(direct.streams.map(s => s.streamUrl));
+            for (const s of fallback.streams) {
+                if (!existingUrls.has(s.streamUrl)) direct.streams.push(s);
             }
+            if (!direct.subtitles && fallback.subtitles) {
+                direct.subtitles = fallback.subtitles;
+                direct.subtitlesHeaders = fallback.subtitlesHeaders;
+            }
+            direct.allSubtitles.push(...fallback.allSubtitles);
+            result = direct;
+            console.log("[extractStreamUrl] Merged direct + fallback: " + result.streams.length + " total stream(s)");
+        } else {
+            result = direct || fallback;
         }
 
         if (!result) {
