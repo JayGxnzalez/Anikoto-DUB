@@ -12,6 +12,7 @@ class AniList {
         const query = `query($search: String) {
             Page(perPage: 15) {
                 media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
+                    id
                     idMal
                     title { english romaji }
                     episodes
@@ -43,6 +44,7 @@ class AniList {
         const items = media
             .filter(m => m.idMal)
             .map(m => ({
+                anilistId: m.id,
                 malId: m.idMal,
                 title: m.title?.english || m.title?.romaji || "Untitled",
                 episodes: m.episodes || null,
@@ -51,6 +53,41 @@ class AniList {
 
         console.log("[AniList] Search returned " + items.length + " usable items");
         return items;
+    }
+
+    static async getDetails(anilistId) {
+        const query = `query ($id: Int) {
+            Media(id: $id, type: ANIME) {
+                description(asHtml: false)
+                episodes
+                status
+                averageScore
+                genres
+                season
+                seasonYear
+            }
+        }`;
+
+        console.log("[AniList] Fetching details for id: " + anilistId);
+        const resp = await soraFetch(ANILIST_API, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Accept": "application/json" },
+            body: JSON.stringify({ query, variables: { id: parseInt(anilistId, 10) } })
+        });
+        if (!resp || resp.status !== 200 || typeof resp.json !== "function") return null;
+        let json;
+        try { json = await resp.json(); } catch (e) { return null; }
+
+        const media = json?.data?.Media;
+        if (!media) return null;
+
+        return {
+            synopsis: (media.description || "").replace(/<br\s*\/?>/gi, "\n").replace(/<\/?[^>]+(>|$)/g, "").trim(),
+            status: media.status || "",
+            score: media.averageScore || "",
+            genres: (media.genres || []).join(", "),
+            season: media.season && media.seasonYear ? media.season + " " + media.seasonYear : ""
+        };
     }
 }
 
@@ -111,6 +148,7 @@ async function fetchMegaplaySources(fileId) {
     let data;
     try { data = await resp.json(); } catch (e) { return null; }
     if (!data?.sources?.file) return null;
+    console.log("[Direct] Megaplay tracks field: " + JSON.stringify(data.tracks ?? "MISSING") + " | full response keys: " + JSON.stringify(Object.keys(data)));
     return buildStreamResult(data, MEGAPLAY + "/");
 }
 
@@ -339,7 +377,7 @@ async function searchResults(keyword) {
         const transformed = items.map(item => ({
             title: item.title,
             image: item.poster,
-            href: "anime/" + item.malId + "?title=" + encodeURIComponent(item.title) + "&eps=" + (item.episodes ?? "")
+            href: "anime/" + item.malId + "?title=" + encodeURIComponent(item.title) + "&eps=" + (item.episodes ?? "") + "&al=" + (item.anilistId ?? "")
         }));
 
         return JSON.stringify(transformed);
@@ -350,14 +388,25 @@ async function searchResults(keyword) {
 }
 
 async function extractDetails(url) {
-    // AniList search doesn't return synopsis; kept minimal rather than
-    // adding a second AniList call this module doesn't otherwise need.
     try {
-        const match = url.match(/anime\/(\d+)\?title=([^&]+)&eps=(\d*)/);
+        const match = url.match(/anime\/(\d+)\?title=([^&]+)&eps=(\d*)&al=(\d*)/);
         if (!match) throw new Error("Invalid URL format");
-        const [, , titleEncoded, eps] = match;
+        const [, , titleEncoded, eps, anilistId] = match;
+        const title = decodeURIComponent(titleEncoded);
+
+        const details = anilistId ? await AniList.getDetails(anilistId) : null;
+        if (details) {
+            return JSON.stringify([{
+                description: details.synopsis || "No description available",
+                aliases: [details.genres, details.season].filter(Boolean).join(" • ") || ("Episodes: " + (eps || "Unknown")),
+                airdate: details.status ? "Status: " + details.status : "Aired: Unknown"
+            }]);
+        }
+
+        // Fallback if the detail lookup fails or no AniList id was carried
+        console.warn("[extractDetails] AniList detail lookup unavailable, using minimal fallback");
         return JSON.stringify([{
-            description: decodeURIComponent(titleEncoded),
+            description: title,
             aliases: eps ? "Episodes: " + eps : "Episodes: Unknown",
             airdate: "Aired: Unknown"
         }]);
